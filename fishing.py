@@ -1,7 +1,12 @@
 import time
 import pyautogui
+import pydirectinput
 import keyboard
 from PIL import ImageGrab
+import win32gui
+import win32process
+import win32com.client
+import pygetwindow as gw
 
 # --- 1080p COORDINATES FROM THE AHK SCRIPT ---
 CAST_ROD_POS = (862, 843)
@@ -18,6 +23,16 @@ TOLERANCE = 10  # RGB color variance allowed
 MAX_WAIT_FOR_BITE = 35  # Max seconds to wait for a fish to bite
 MAX_MINIGAME_TIME = 10  # Max seconds the minigame should last
 
+# --- 1440p COORDINATES FROM THE AHK SCRIPT ---
+CAST_ROD_POS = (1161, 1124)
+BITE_INDICATOR_POS = (1536, 1119)
+BAR_COLOR_POS = (1261, 1033)
+CLAIM_FISH_POS = (1457, 491)
+
+# Mini-game search area bounding box: (left_X, top_Y, width, height)
+# Original AHK box: 1043, 1033 to 1519, 1058
+MINIGAME_REGION = (1043, 1033, 1519 - 1043, 1058 - 1033) # Evaluates to (1043, 1033, 476, 25)
+
 class FishSolBot:
     def __init__(self):
         self.is_running = False
@@ -29,13 +44,71 @@ class FishSolBot:
                 abs(c1[1] - c2[1]) <= tol and 
                 abs(c1[2] - c2[2]) <= tol)
 
+    def find_window_hwnd(self):
+        ROBLOX_CLASS = "WINDOWSCLIENT"
+
+        def callback(hwnd, result):
+            if win32gui.IsWindowVisible(hwnd):
+                if win32gui.GetClassName(hwnd) == ROBLOX_CLASS:
+                    result.append(hwnd)
+
+        result = []
+        win32gui.EnumWindows(callback, result)
+        return result[0] if result else None
+
+    def focus_hwnd(self, hwnd):
+        if hwnd is None:
+            print("No HWND to focus")
+            return False
+
+        # 1. Restore if minimized
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+
+        # 2. Bypass focus-stealing prevention
+        shell = win32com.client.Dispatch("WScript.Shell")
+        shell.SendKeys('%')  # Simulate ALT press
+
+        # 3. Attach input threads
+        try:
+            fg = win32gui.GetForegroundWindow()
+            fg_thread = win32process.GetWindowThreadProcessId(fg)[0]
+            target_thread = win32process.GetWindowThreadProcessId(hwnd)[0]
+
+            win32process.AttachThreadInput(fg_thread, target_thread, True)
+            win32gui.SetForegroundWindow(hwnd)
+            win32process.AttachThreadInput(fg_thread, target_thread, False)
+            return True
+        
+    def focus_roblox(self):
+        try:
+            # Find the Roblox window and bring it to the front safely
+            roblox = gw.getWindowsWithTitle('Roblox')[0]
+            roblox.activate()
+        except Exception as e:
+            print("Could not pull window to front. Please click it manually.")
+
+        except Exception as e:
+            print("Focus failed:", e)
+            return False
+
     def play_fishing_cycle(self):
+        self.focus_roblox()
         """The main fishing loop logic extracted from the AHK DoMouseMove."""
         
         # 1. Cast the fishing rod
-        pyautogui.moveTo(*CAST_ROD_POS)
+        # Move near the button first
+        pydirectinput.moveTo(CAST_ROD_POS[0], CAST_ROD_POS[1] - 50)
+        time.sleep(0.1)
+
+        # Slide onto the button using DirectX input
+        pydirectinput.moveTo(CAST_ROD_POS[0], CAST_ROD_POS[1], duration=0.2)
+        time.sleep(0.1)
+
+        pydirectinput.mouseDown()
         time.sleep(0.05)
-        pyautogui.click()
+        pydirectinput.mouseUp()
+
         time.sleep(0.3)
         
         print("Waiting for bite...")
@@ -89,13 +162,34 @@ class FishSolBot:
                 pyautogui.click()
                 time.sleep(0.01) # Tiny sleep to prevent clicking too fast
 
+        # SAFEGUARD: Release the mouse just in case the minigame loop left it held down
+        pydirectinput.mouseUp()
+        
         # 4. Claim the Fish
-        print("Mini-game finished. Claiming fish...")
+        print("Mini-game finished. Waiting for Claim button to spawn...")
+        
+        # Wait 1.5 seconds to ensure the minigame animation is 100% over 
+        # and the Claim button is fully rendered on screen
+        time.sleep(1.5)
+        
+        # Teleport to the top-left corner of your screen to "reset" the mouse
+        pydirectinput.moveTo(10, 10)
+        time.sleep(0.1)
+        
+        # Now teleport 50 pixels above the Claim button
+        pydirectinput.moveTo(CLAIM_FISH_POS[0], CLAIM_FISH_POS[1] - 50)
+        time.sleep(0.1)
+        
+        # Slide onto the Claim button to trigger the hover state
+        pydirectinput.moveTo(*CLAIM_FISH_POS, duration=0.2)
         time.sleep(0.3)
-        pyautogui.moveTo(*CLAIM_FISH_POS)
-        time.sleep(0.7)
-        pyautogui.click()
-        time.sleep(0.3)
+        
+        # Hardware-level Click
+        pydirectinput.mouseDown()
+        time.sleep(0.1)
+        pydirectinput.mouseUp()
+        
+        time.sleep(0.5)
 
     def start(self):
         """Starts the background keyboard listeners and the main loop."""
