@@ -43,43 +43,7 @@ class FishSolBot:
         return (abs(c1[0] - c2[0]) <= tol and 
                 abs(c1[1] - c2[1]) <= tol and 
                 abs(c1[2] - c2[2]) <= tol)
-
-    def find_window_hwnd(self):
-        ROBLOX_CLASS = "WINDOWSCLIENT"
-
-        def callback(hwnd, result):
-            if win32gui.IsWindowVisible(hwnd):
-                if win32gui.GetClassName(hwnd) == ROBLOX_CLASS:
-                    result.append(hwnd)
-
-        result = []
-        win32gui.EnumWindows(callback, result)
-        return result[0] if result else None
-
-    def focus_hwnd(self, hwnd):
-        if hwnd is None:
-            print("No HWND to focus")
-            return False
-
-        # 1. Restore if minimized
-        if win32gui.IsIconic(hwnd):
-            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-
-        # 2. Bypass focus-stealing prevention
-        shell = win32com.client.Dispatch("WScript.Shell")
-        shell.SendKeys('%')  # Simulate ALT press
-
-        # 3. Attach input threads
-        try:
-            fg = win32gui.GetForegroundWindow()
-            fg_thread = win32process.GetWindowThreadProcessId(fg)[0]
-            target_thread = win32process.GetWindowThreadProcessId(hwnd)[0]
-
-            win32process.AttachThreadInput(fg_thread, target_thread, True)
-            win32gui.SetForegroundWindow(hwnd)
-            win32process.AttachThreadInput(fg_thread, target_thread, False)
-            return True
-        
+ 
     def focus_roblox(self):
         try:
             # Find the Roblox window and bring it to the front safely
