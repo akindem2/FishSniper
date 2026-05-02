@@ -18,4 +18,5 @@ class FishSniperUI(ctk.CTk):
         # Placeholder for starting the sniping process
         print("Starting FishSniper...")
 
+app = FishSniperUI()
 app.mainloop()
