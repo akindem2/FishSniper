@@ -14,10 +14,13 @@ class FishSniperUI(ctk.CTk):
         self.label = ctk.CTkLabel(self, text="Welcome to FishSniper!")
         self.label.pack(pady=20)
 
-        self.start_button = ctk.CTkButton(self, text="Start Fishing", command=self.start_sniping)
+        self.start_button = ctk.CTkButton(self, text="Start", command=self.start_sniping)
         self.start_button.pack(pady=10)
 
-        self.stop_button = ctk.CTkButton(self, text="Stop Fishing", command=self.stop_sniping)
+        self.pause_button = ctk.CTkButton(self, text="Pause", command=self.pause_sniping)
+        self.pause_button.pack(pady=10)
+
+        self.stop_button = ctk.CTkButton(self, text="Stop", command=self.stop_sniping)
         self.stop_button.pack(pady=10)
 
         # Start the bot loop in the background
@@ -27,9 +30,14 @@ class FishSniperUI(ctk.CTk):
         fish_loop.toggle_on()
         print("Fishing started")
 
-    def stop_sniping(self):
+    def pause_sniping(self):
         fish_loop.toggle_off()
+        print("Fishing paused")
+
+    def stop_sniping(self):
+        fish_loop.stop()
         print("Fishing stopped")
+
 
 app = FishSniperUI()
 app.mainloop()
