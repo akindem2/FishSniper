@@ -7,7 +7,10 @@ import win32com.client
 import win32con
 import ctypes
 import pygetwindow as gw
+from ui import FishSniperUI
 
+
+###DEFAULT COORDINATES (1080p) - WILL BE OVERRIDDEN BY UI SELECTION
 # --- 1080p COORDINATES FROM THE AHK SCRIPT ---
 CAST_ROD_POS = (862, 843)
 BITE_INDICATOR_POS = (1176, 836)
@@ -16,12 +19,70 @@ CLAIM_FISH_POS = (1113, 342)
 MINIGAME_REGION = (757, 762, 1161 - 757, 782 - 762)
 
 
-# --- 1440p COORDINATES ---
-CAST_ROD_POS = (1161, 1124)
-BITE_INDICATOR_POS = (1536, 1119)
-BAR_COLOR_POS = (1261, 1033)
-CLAIM_FISH_POS = (1457, 491)
-MINIGAME_REGION = (1043, 1033, 476, 25)
+COORDS = {
+    "1080p": {
+        "FISHING": {
+            "CAST_ROD": (862, 843),
+            "BITE_INDICATOR": (1176, 836),
+            "BAR_COLOR": (955, 767),
+            "CLAIM_FISH": (1113, 342),
+            # (left, top, width, height)
+            "MINIGAME_REGION": (757, 762, 404, 20) 
+        },
+        "MERCHANT": {
+            "CAMERA_SETUP_1": (47, 467),
+            "CAMERA_SETUP_2": (382, 126),
+            "OPEN_MERCHANT_1": (956, 803),
+            "OPEN_MERCHANT_2": (956, 938),
+            "SELECT_FISH": (828, 404),
+            "SELL_ALL_ON": (680, 804),
+            "SELL_ALL_OFF": (512, 804),
+            "CONFIRM_SELL": (801, 626),
+            "CLOSE_MERCHANT": (1458, 266)
+        },
+    },
+
+    "1440p": {
+        "FISHING": {
+            "CAST_ROD": (1161, 1124),
+            "BITE_INDICATOR": (1536, 1119),
+            "BAR_COLOR": (1261, 1033),
+            "CLAIM_FISH": (1457, 491),
+            "MINIGAME_REGION": (1043, 1033, 476, 25)
+        },
+        "MERCHANT": {
+            "CAMERA_SETUP_1": (52, 621),
+            "CAMERA_SETUP_2": (525, 158),
+            "OPEN_MERCHANT_1": (1308, 1073),
+            "OPEN_MERCHANT_2": (1289, 1264),
+            "SELECT_FISH": (1117, 550),
+            "SELL_ALL_ON": (904, 1080),
+            "SELL_ALL_OFF": (700, 1078),
+            "CONFIRM_SELL": (1002, 831),
+            "CLOSE_MERCHANT": (1958, 361)
+        }
+    },
+    "1366x768": {
+        "FISHING": {
+            "CAST_ROD": (603, 597),
+            "BITE_INDICATOR": (866, 593),
+            "BAR_COLOR": (674, 533),
+            "CLAIM_FISH": (829, 218),
+            "MINIGAME_REGION": (513, 531, 343, 18)
+        },
+        "MERCHANT": {
+            "CAMERA_SETUP_1": (26, 325),
+            "CAMERA_SETUP_2": (273, 106),
+            "OPEN_MERCHANT_1": (682, 563),
+            "OPEN_MERCHANT_2": (682, 667),
+            "SELECT_FISH": (586, 287),
+            "SELL_ALL_ON": (486, 570),
+            "SELL_ALL_OFF": (365, 570),
+            "CONFIRM_SELL": (573, 447),
+            "CLOSE_MERCHANT": (1050, 197)
+        }
+    }
+}
 
 TOLERANCE = 10
 MAX_WAIT_FOR_BITE = 35
@@ -79,7 +140,14 @@ class FishSolBot:
         except Exception as e:
             print(f"[System] Focus trick failed: {e}")
             return False
-
+        
+    for resolution in COORDS():
+        if COORDS == FishSniperUI.res:
+            CAST_ROD_POS = COORDS[resolution]["FISHING"]["CAST_ROD"]
+            BITE_INDICATOR_POS = COORDS[resolution]["FISHING"]["BITE_INDICATOR"]
+            BAR_COLOR_POS = COORDS[resolution]["FISHING"]["BAR_COLOR"]
+            CLAIM_FISH_POS = COORDS[resolution]["FISHING"]["CLAIM_FISH"]
+            MINIGAME_REGION = COORDS[resolution]["FISHING"]["MINIGAME_REGION"]
     # -------------------------
     # AUTO-SELL & PATHING
     # -------------------------
@@ -112,7 +180,7 @@ class FishSolBot:
         for _ in range(80):
             if not self.is_running: return
             pyautogui.scroll(100)
-            time.sleep(0.01)
+            time.sleep(0.005)
         time.sleep(0.5)
         
         # Zoom Out to required distance
@@ -120,7 +188,7 @@ class FishSolBot:
             if not self.is_running: return
             pyautogui.scroll(-20)
             
-            time.sleep(0.01)
+            time.sleep(0.005)
         time.sleep(0.3)
 
     def walk_to_merchant(self):
