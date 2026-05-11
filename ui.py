@@ -13,8 +13,9 @@ class DualLogger(object):
         self.original_stdout = original_stdout
 
     def write(self, text):
-        self.original_stdout.write(text)
-        self.original_stdout.flush()
+        if self.original_stdout is not None:
+            self.original_stdout.write(text)
+            self.original_stdout.flush()
         def append():
             self.widget.configure(state="normal")
             self.widget.insert("end", text)
@@ -23,7 +24,8 @@ class DualLogger(object):
         self.widget.after(0, append)
 
     def flush(self):
-        self.original_stdout.flush()
+        if self.original_stdout is not None:
+            self.original_stdout.flush()
 
 BIOMES = ["Rainy", "Snowy", "Windy", "Hell", "Heaven", "Corruption", "Starfall", "Sand Storm", "Null", "Glitched", "Dreamspace", "Cyberspace"]
 

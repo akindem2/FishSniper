@@ -85,97 +85,197 @@ def resolve_private_server_from_place(place_id):
         print(f"[Resolver] Error resolving private server: {e}")
         return None
 
-def resolve_and_launch_with_cookie(raw_url, cookie):
+def _parse_roblox_link(raw_url: str):
     """
-    Parses any Roblox link (including the new share-links wrapper) 
-    and uses the Cookie + AuthTicket API to launch securely.
+    Returns (place_id, link_code, share_code)
+    - place_id: string or None
+    - link_code: privateServerLinkCode or joinCode or None
+    - share_code: share-links code (hex) or None
     """
-    print(f"[Roblox Launcher] Processing link: {raw_url}")
-    
     place_id = None
     link_code = None
     share_code = None
-    
-    # 1. Check for standard Private Server Link
-    direct_match = re.search(r"games/(\d+)(?:/.*?)?[?&]privateServerLinkCode=([\w-]+)", raw_url, re.IGNORECASE)
-    if direct_match:
-        place_id = direct_match.group(1)
-        link_code = direct_match.group(2)
-    else:
-        # 2. Check for the new Share Code format
-        share_match = re.search(r"code=([a-f0-9]+)", raw_url, re.IGNORECASE)
-        if share_match:
-            share_code = share_match.group(1)
-            print(f"[Roblox Launcher] Detected Share Code: {share_code}. Resolving via API...")
-            try:
-                # Use the resolving API present in your original sniper code
-                res = requests.post(f"https://api-priv.vexsys.site/api/endpoints/roblox/resolve-link?linkId={share_code}", timeout=10)
-                if res.status_code == 200:
-                    data = res.json()
-                    place_id = data.get("placeId")
-                    link_code = data.get("privateServerLinkCode")
-                else:
-                    print(f"[Roblox Launcher] Private API failed to resolve share code. HTTP {res.status_code}")
-            except Exception as e:
-                print(f"[Roblox Launcher] Error calling resolving API: {e}")
 
-    # Fallback if we have a Share Code but the API failed to convert it
+    # 1. Direct private server link:
+    #    https://www.roblox.com/games/PLACEID/... ?privateServerLinkCode=XXXX
+    m = re.search(
+        r"games/(\d+)(?:/.*?)?[?&]privateServerLinkCode=([\w-]+)",
+        raw_url,
+        re.IGNORECASE,
+    )
+    if m:
+        place_id = m.group(1)
+        link_code = m.group(2)
+        return place_id, link_code, None
+
+    # 2. New share-links wrapper:
+    #    https://www.roblox.com/share-links?code=abcdef1234...
+    m = re.search(r"[?&]code=([a-f0-9]+)", raw_url, re.IGNORECASE)
+    if m:
+        share_code = m.group(1)
+        return None, None, share_code
+
+    # 3. Some bots send just the roblox:// deep link
+    #    roblox://placeID=...&linkCode=...
+    m = re.search(r"placeID=(\d+)", raw_url, re.IGNORECASE)
+    if m:
+        place_id = m.group(1)
+    m2 = re.search(r"linkCode=([\w-]+)", raw_url, re.IGNORECASE)
+    if m2:
+        link_code = m2.group(1)
+
+    return place_id, link_code, None
+
+
+def _resolve_share_code(share_code: str):
+    """
+    Uses Roblox's share-links API to resolve a share code into:
+    (place_id, link_code) or (None, None) on failure.
+    """
+    try:
+        url = f"https://apis.roblox.com/share-links/v1/share-links/{share_code}"
+        res = requests.get(url, timeout=10)
+        if res.status_code != 200:
+            print(f"[Roblox Launcher] Share-links API HTTP {res.status_code}")
+            return None, None
+
+        data = res.json()
+        # Typical structure:
+        # {
+        #   "targetType": "Experience",
+        #   "targetId": 15532962292,
+        #   "linkType": "ExperienceInvite",
+        #   "data": {
+        #       "placeId": 15532962292,
+        #       "privateServerLinkCode": "XXXX-XXXX"
+        #   }
+        # }
+        target_id = data.get("targetId")
+        payload = data.get("data", {}) or {}
+        place_id = str(payload.get("placeId") or target_id or "")
+        link_code = payload.get("privateServerLinkCode") or payload.get("joinCode")
+
+        if not place_id or not link_code:
+            print("[Roblox Launcher] Share-links API returned incomplete data.")
+            return None, None
+
+        print(
+            f"[Roblox Launcher] Resolved share code {share_code} → "
+            f"placeId={place_id}, linkCode={link_code}"
+        )
+        return place_id, link_code
+
+    except Exception as e:
+        print(f"[Roblox Launcher] Error resolving share code via API: {e}")
+        return None, None
+
+
+def _launch_deeplink(place_id: str, link_code: str):
+    """
+    Last-resort deep link launcher. Works if Roblox is installed and
+    registered as URL handler.
+    """
+    url = f"roblox://placeID={place_id}&linkCode={link_code}"
+    print(f"[Roblox Launcher] Launching via deep link: {url}")
+    os.startfile(url)
+    return True
+
+
+def resolve_and_launch_with_cookie(raw_url, cookie):
+    """
+    Robust resolver:
+    - Handles direct private server links
+    - Handles share-links via Roblox API
+    - Uses cookie + auth ticket when possible
+    - Falls back to deep link if cookie invalid/missing
+    """
+    print(f"[Roblox Launcher] Processing link: {raw_url}")
+
+    place_id, link_code, share_code = _parse_roblox_link(raw_url)
+
+    # If we only have a share code, resolve it via Roblox API
+    if share_code and (not place_id or not link_code):
+        print(f"[Roblox Launcher] Detected Share Code: {share_code}. Resolving via Roblox API...")
+        r_place, r_link = _resolve_share_code(share_code)
+        if r_place and r_link:
+            place_id, link_code = r_place, r_link
+
+    # If still missing place/link, try a last-resort share deep link
     if not place_id or not link_code:
         if share_code:
-            # Launch using Roblox's native share deep link handler
             url = f"roblox://navigation/share_links?code={share_code}&type=Server"
-            print(f"[Roblox Launcher] Could not resolve IDs. Falling back to Share Code Deep Link: {url}")
+            print(f"[Roblox Launcher] Could not fully resolve IDs. Falling back to Share Deep Link: {url}")
             os.startfile(url)
             return True
         else:
             print("[Roblox Launcher] Failed to extract any valid Roblox joining data from the URL.")
             return False
 
-    # Proceed to launch via Cookie Injection
+    # At this point we have place_id + link_code
+    # If no cookie, just use deep link
     if not cookie or cookie.strip() == "":
-        url = f"roblox://placeID={place_id}&linkCode={link_code}"
-        print(f"[Roblox Launcher] No cookie provided. Launching via deep link: {url}")
-        os.startfile(url)
-        return True
+        return _launch_deeplink(place_id, link_code)
 
+    # Cookie-based auth ticket flow
     try:
         session = requests.Session()
-        session.cookies[".ROBLOSECURITY"] = cookie
-        
+        session.cookies[".ROBLOSECURITY"] = cookie.strip()
+
+        # First call to get X-CSRF
         csrf_res = session.post("https://auth.roblox.com/v1/authentication-ticket")
         csrf_token = csrf_res.headers.get("x-csrf-token")
-        
+
         if not csrf_token:
-            csrf_res = session.post("https://api.roblox.com/v1/xsrf-token")
-            csrf_token = csrf_res.headers.get("x-csrf-token")
-            
+            # Try legacy xsrf endpoint as backup
+            xsrf_res = session.post("https://api.roblox.com/v1/xsrf-token")
+            csrf_token = xsrf_res.headers.get("x-csrf-token")
+
+        if not csrf_token:
+            print("[Roblox Launcher] Failed to obtain X-CSRF token. Falling back to deep link.")
+            return _launch_deeplink(place_id, link_code)
+
         headers = {
             "X-CSRF-TOKEN": csrf_token,
-            "Referer": "https://www.roblox.com"
+            "Referer": "https://www.roblox.com",
         }
-        
-        ticket_res = session.post("https://auth.roblox.com/v1/authentication-ticket", headers=headers)
+
+        ticket_res = session.post(
+            "https://auth.roblox.com/v1/authentication-ticket",
+            headers=headers,
+        )
         ticket = ticket_res.headers.get("rbx-authentication-ticket")
-        
+
         if not ticket:
-            print("[Roblox Launcher] Cookie is invalid or expired! Falling back to deep link...")
-            url = f"roblox://placeID={place_id}&linkCode={link_code}"
-            os.startfile(url)
-            return True
-            
-        launcher_url = f"https://assetgame.roblox.com/game/PlaceLauncher.ashx?request=RequestGame&placeId={place_id}&isPlayTogetherGame=false&privateServerLinkCode={link_code}"
+            print("[Roblox Launcher] Cookie invalid or ticket missing. Falling back to deep link.")
+            return _launch_deeplink(place_id, link_code)
+
+        launcher_url = (
+            "https://assetgame.roblox.com/game/PlaceLauncher.ashx"
+            f"?request=RequestGame&placeId={place_id}"
+            f"&isPlayTogetherGame=false&privateServerLinkCode={link_code}"
+        )
         encoded_launcher_url = urllib.parse.quote(launcher_url)
-        
+
         launch_time = int(time.time() * 1000)
-        launch_str = f"roblox-player:1+launchmode:play+gameinfo:{ticket}+launchtime:{launch_time}+placelauncherurl:{encoded_launcher_url}+robloxLocale:en_us+gameLocale:en_us+channel:"
-        
+        launch_str = (
+            "roblox-player:1"
+            f"+launchmode:play"
+            f"+gameinfo:{ticket}"
+            f"+launchtime:{launch_time}"
+            f"+placelauncherurl:{encoded_launcher_url}"
+            "+robloxLocale:en_us"
+            "+gameLocale:en_us"
+            "+channel:"
+        )
+
+        print("[Roblox Launcher] Launching Roblox using Cookie Auth + PlaceLauncher...")
         os.startfile(launch_str)
-        print(f"[Roblox Launcher] Successfully launched Roblox using Cookie Auth!")
         return True
 
     except Exception as e:
         print(f"[Roblox Launcher] Fatal error during resolution/launch: {e}")
-        return False
+        print("[Roblox Launcher] Falling back to deep link.")
+        return _launch_deeplink(place_id, link_code)
 
 
 class Scanner(discord.Client):

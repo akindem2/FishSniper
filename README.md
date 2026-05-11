@@ -19,7 +19,7 @@ FishSniper is a powerful, automated fishing tool designed for Roblox, featuring 
 - Roblox (logged in)
 - Required Python packages:
   ```bash
-  pip install customtkinter pydirectinput pyautogui requests discord.py
+  pip install customtkinter pydirectinput pyautogui requests discord.py-self
   ```
 
 ### Running the App
