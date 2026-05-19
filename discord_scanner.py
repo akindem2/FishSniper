@@ -321,8 +321,12 @@ class Scanner(discord.Client):
                         self.ui_reference.update_status("Scanning for biomes...")
 
 
+intents = discord.Intents.default()
+intents.message_content = True
+
 # Global instance
 scanner = Scanner(
+    intents=intents,
     chunk_guilds_at_startup=False,
     member_cache_flags=discord.MemberCacheFlags.none(),
 )
