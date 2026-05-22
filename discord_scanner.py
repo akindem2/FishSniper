@@ -4,12 +4,38 @@ import urllib.parse
 import requests
 import time
 import os
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
 
 URL_REGEX = r"https?://[^\s)]+"
 MD_LINK_REGEX = r"\[.*?\]\((https?://[^\s)]+)\)"
 
 # If you ever support multiple games, make this configurable.
 DEFAULT_PLACE_ID = "15532962292"  # FishSol placeId (update if needed)
+
+LOG_JOIN_CONFIRM_TIMEOUT = 120
+LOG_POLL_INTERVAL = 0.1
+
+BIOME_LOG_DATA = [
+    {"name": "NORMAL", "title": "Normal", "asset id": 80690294537387},
+    {"name": "SNOWY", "title": "Snowy", "asset id": 109912975653138},
+    {"name": "WINDY", "title": "Windy", "asset id": 138169499467564},
+    {"name": "RAINY", "title": "Rainy", "asset id": 137992545432987},
+    {"name": "SAND STORM", "title": "Sand Storm", "asset id": 102180669654341},
+    {"name": "HELL", "title": "Hell", "asset id": 89721298978404},
+    {"name": "STARFALL", "title": "Starfall", "asset id": 110087292131274},
+    {"name": "HEAVEN", "title": "Heaven", "asset id": 107114559110957},
+    {"name": "CORRUPTION", "title": "Corruption", "asset id": 137622939436355},
+    {"name": "NULL", "title": "Null", "asset id": 120277135407020},
+    {"name": "GLITCHED", "title": "Glitched", "asset id": 92180140049616},
+    {"name": "DREAMSPACE", "title": "Dreamspace", "asset id": 124768988619166},
+    {"name": "CYBERSPACE", "title": "Cyberspace", "asset id": 89000537898277},
+    {"name": "EGGLAND", "title": "Eggland", "asset id": 107114559110957},
+    {"name": "SINGULARITY", "title": "Singularity", "asset id": 107114559110957},
+]
+
+LOG_GAME_MARKERS = ("Sol's RNG", DEFAULT_PLACE_ID)
 
 
 def extract_text(message):
@@ -51,17 +77,223 @@ def extract_urls(message):
     return list(dict.fromkeys(urls))
 
 
-def resolve_private_server_from_place(place_id):
+def normalize_biome_name(name):
+    return re.sub(r"[^a-z0-9]+", "", (name or "").lower())
+
+
+BIOME_TITLE_BY_NORMALIZED = {
+    normalize_biome_name(biome["title"]): biome["title"] for biome in BIOME_LOG_DATA
+}
+
+BIOME_TITLE_BY_ASSET_ID = {
+    str(biome["asset id"]): biome["title"] for biome in BIOME_LOG_DATA
+}
+
+BIOME_TITLE_BY_HOVER_TEXT = {
+    biome["name"].upper(): biome["title"] for biome in BIOME_LOG_DATA
+}
+
+
+def canonical_biome_title(name):
+    normalized = normalize_biome_name(name)
+    return BIOME_TITLE_BY_NORMALIZED.get(normalized, name)
+
+
+def read_first_5_mb(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read(5_000_000)
+    except Exception as e:
+        print(f"[Log Scanner] Error reading {path}: {e}")
+        return ""
+
+
+def read_tail_text(path, max_bytes=1_000_000):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            end = f.tell()
+            f.seek(max(0, end - max_bytes))
+            return f.read().decode("utf-8", errors="ignore")
+    except Exception as e:
+        print(f"[Log Scanner] Error reading tail for {path}: {e}")
+        return ""
+
+
+def parse_log_timestamp(ts):
+    if not ts or len(ts) < 10:
+        return None
+
+    ts = ts.rstrip("Z")
+
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return None
+
+
+def seconds_since(ts):
+    log_time = parse_log_timestamp(ts)
+    if log_time is None:
+        return None
+    return (datetime.now(timezone.utc) - log_time).total_seconds()
+
+
+def read_last_valid_line(path):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            end = f.tell()
+            buffer = b""
+            pos = end
+
+            while pos > 0:
+                pos -= 1
+                f.seek(pos)
+                char = f.read(1)
+
+                if char == b"\n":
+                    line = buffer[::-1].decode("utf-8", errors="ignore").strip()
+                    if line.startswith("20"):
+                        return line
+                    buffer = b""
+                else:
+                    buffer += char
+
+    except Exception as e:
+        print(f"[Log Scanner] Error reading last line for {path}: {e}")
+
+    return None
+
+
+def find_roblox_logs():
+    localappdata = os.getenv("LOCALAPPDATA")
+    if not localappdata:
+        print("[Log Scanner] LOCALAPPDATA is not available.")
+        return []
+
+    roblox_logs_dir = Path(localappdata) / "Roblox" / "logs"
+    if not roblox_logs_dir.exists():
+        print("[Log Scanner] Roblox logs folder not found.")
+        return []
+
+    logs = [
+        log
+        for log in roblox_logs_dir.glob("*.log")
+        if "installer" not in log.name.lower()
+    ]
+    logs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return logs
+
+
+def get_roblox_username_from_cookie(cookie):
+    if not cookie or not cookie.strip():
+        return None
+
+    try:
+        res = requests.get(
+            "https://users.roblox.com/v1/users/authenticated",
+            cookies={".ROBLOSECURITY": cookie},
+            timeout=5,
+        )
+        if res.status_code == 200:
+            return res.json().get("name")
+    except Exception as e:
+        print(f"[Log Scanner] Could not resolve Roblox username from cookie: {e}")
+
+    return None
+
+
+def identify_roblox_log(cookie=None):
+    logs = find_roblox_logs()
+    if not logs:
+        print("[Log Scanner] No Roblox logs found.")
+        return None
+
+    username = get_roblox_username_from_cookie(cookie)
+    if username:
+        print(f"[Log Scanner] Looking for active log for Roblox user: {username}")
+    else:
+        print("[Log Scanner] Roblox username unavailable; using most recent matching log.")
+
+    candidates = []
+    for log_path in logs:
+        data = read_first_5_mb(log_path)
+        has_user = not username or username in data
+        has_game_marker = any(marker in data for marker in LOG_GAME_MARKERS)
+        if has_user and has_game_marker:
+            candidates.append(log_path)
+
+    if not candidates:
+        print("[Log Scanner] No game-specific log found; falling back to recent Roblox logs.")
+        candidates = logs[:5]
+
+    for path in candidates:
+        last_line = read_last_valid_line(path)
+        if not last_line:
+            continue
+
+        timestamp = last_line.split(",", 1)[0].strip()
+        age = seconds_since(timestamp)
+        if age is not None and age <= 120:
+            print(f"[Log Scanner] Assigned active Roblox log: {path.name}")
+            return path
+
+    fallback = candidates[0]
+    print(f"[Log Scanner] No very recent timestamp found; using latest candidate: {fallback.name}")
+    return fallback
+
+
+def detect_biome_from_log_text(data, min_time=None):
+    detected = None
+
+    for line in data.splitlines():
+        if min_time:
+            line_timestamp = parse_log_timestamp(line.split(",", 1)[0].strip())
+            if not line_timestamp or line_timestamp < min_time:
+                continue
+
+        hover_match = re.search(r'"hoverText"\s*:\s*"([^"]+)"', line)
+        asset_match = re.search(r'"assetId"\s*:\s*(\d+)', line)
+        if not hover_match or not asset_match:
+            continue
+
+        hover_text = hover_match.group(1).upper()
+        asset_id = asset_match.group(1)
+        asset_title = BIOME_TITLE_BY_ASSET_ID.get(asset_id)
+        hover_title = BIOME_TITLE_BY_HOVER_TEXT.get(hover_text)
+
+        if asset_title and hover_title and asset_title == hover_title:
+            detected = asset_title
+        elif hover_title:
+            detected = hover_title
+        elif asset_title:
+            detected = asset_title
+
+    return detected
+
+
+def resolve_private_server_from_place(place_id, cookie=None):
     """
     Fallback resolver:
     Queries Roblox's private server list for the given place_id
     and returns the first available invite code (joinCode/linkCode).
-    This assumes you're joining your own private server for that game.
+    Requires a valid cookie to access the authenticated user's private servers.
     """
     try:
         url = f"https://games.roblox.com/v1/games/{place_id}/private-servers"
-        res = requests.get(url).json()
-        servers = res.get("data", [])
+
+        # Must include the cookie, otherwise this endpoint returns 401 Unauthorized
+        cookies = {".ROBLOSECURITY": cookie} if cookie else {}
+        res = requests.get(url, cookies=cookies)
+
+        if res.status_code != 200:
+            print(f"[Resolver] API returned {res.status_code}. Is cookie valid?")
+            return None
+
+        servers = res.json().get("data", [])
 
         if not servers:
             print(f"[Resolver] No private servers found for placeId={place_id}")
@@ -208,8 +440,24 @@ def resolve_and_launch_with_cookie(raw_url, cookie):
             os.startfile(url)
             return True
         else:
-            print("[Roblox Launcher] Failed to extract any valid Roblox joining data from the URL.")
-            return False
+            # 3. Check for standard Public Server Link
+            public_match = re.search(r"games/(\d+)", raw_url, re.IGNORECASE)
+            if public_match:
+                place_id = public_match.group(1)
+                print(f"[Roblox Launcher] Detected Public Server. Place: {place_id}")
+
+    # Helper function to generate modern Roblox deep links
+    def get_modern_deep_link():
+        if share_code and not place_id:
+            return f"roblox://navigation/share_links?code={share_code}&type=Server"
+        dl = f"roblox://experiences/start?placeId={place_id}"
+        if link_code:
+            dl += f"&privateServerLinkCode={link_code}"
+        return dl
+
+    if not place_id and not share_code:
+        print("[Roblox Launcher] Failed to extract any valid Roblox joining data from the URL.")
+        return False
 
     # At this point we have place_id + link_code
     # If no cookie, just use deep link
@@ -224,6 +472,7 @@ def resolve_and_launch_with_cookie(raw_url, cookie):
         # First call to get X-CSRF
         csrf_res = session.post("https://auth.roblox.com/v1/authentication-ticket")
         csrf_token = csrf_res.headers.get("x-csrf-token")
+
 
         if not csrf_token:
             # Try legacy xsrf endpoint as backup
@@ -244,6 +493,7 @@ def resolve_and_launch_with_cookie(raw_url, cookie):
             headers=headers,
         )
         ticket = ticket_res.headers.get("rbx-authentication-ticket")
+
 
         if not ticket:
             print("[Roblox Launcher] Cookie invalid or ticket missing. Falling back to deep link.")
@@ -290,10 +540,13 @@ class Scanner(discord.Client):
             None  # None = Hunting, string = name of active biome we are in
         )
         self.roblox_cookie = None
-        self.scanner_paused_until = 0  # Timestamp when scanner can resume
         self.ui_reference = None  # Reference to UI for status updates
         self.webhook_url = None
-        self.monitor_thread = None
+        self.log_monitor_thread = None
+        self.log_monitor_stop = threading.Event()
+        self.log_monitor_lock = threading.Lock()
+        self.log_biome_confirmed = False
+        self.assigned_log = None
 
     async def on_ready(self):
         print(f"Logged in as {self.user}")
@@ -302,8 +555,9 @@ class Scanner(discord.Client):
         if not self.is_running:
             return
 
-        # Check if scanner is temporarily paused
-        if time.time() < self.scanner_paused_until:
+        # The Discord scanner stays quiet while the Roblox log monitor verifies
+        # and tracks the biome we already joined.
+        if self.active_biome_session:
             return
 
         if message.webhook_id is None and not message.author.bot:
@@ -352,26 +606,168 @@ class Scanner(discord.Client):
                             self.fish_loop.has_done_initial_pathing = False
                             self.fish_loop.toggle_on()
                         
-                        # Use predefined biome duration to pause the scanner
-                        from ui import BIOME_PAUSE_DURATIONS
-                        
-                        # Match the biome name exact casing if needed, but 'biome' should match keys already
-                        duration = BIOME_PAUSE_DURATIONS.get(biome, 1200) # Default 20 mins if not found
-                        self.scanner_paused_until = time.time() + duration
-                        self.active_biome_session = biome
-                        print(f"[Discord Scanner] Pausing scanner for {duration} seconds (for biome {biome})")
-                        
-                        if self.webhook_url:
-                            from webhook import Webhook
-                            Webhook(self.webhook_url).send_biome_joined(biome)
+                        if success:
+                            self._start_log_monitor(biome)
                         
                         return
                     else:
                         print(f"[Discord Scanner] Biome '{biome}' started, but no links were found in the message.")
 
+    def _start_log_monitor(self, biome):
+        canonical_biome = canonical_biome_title(biome)
+
+        with self.log_monitor_lock:
+            self.log_monitor_stop.set()
+            self.log_monitor_stop = threading.Event()
+            self.active_biome_session = canonical_biome
+            self.log_biome_confirmed = False
+
+            self.log_monitor_thread = threading.Thread(
+                target=self._monitor_joined_biome_log,
+                args=(canonical_biome, self.log_monitor_stop),
+                daemon=True,
+            )
+            self.log_monitor_thread.start()
+
+        print(f"[Discord Scanner] Watching Roblox logs to verify biome: {canonical_biome}")
+        if self.ui_reference:
+            self.ui_reference.update_status(f"Verifying {canonical_biome} in logs...")
+
+    def _monitor_joined_biome_log(self, expected_biome, stop_event):
+        joined_at = time.time()
+        expected_norm = normalize_biome_name(expected_biome)
+
+        log_path = identify_roblox_log(self.roblox_cookie)
+        if not log_path:
+            self._finish_biome_session(
+                expected_biome,
+                reason="fake",
+                observed_biome=None,
+                detail="Roblox log could not be found",
+            )
+            return
+
+        self.assigned_log = log_path
+        last_pos = 0
+
+        recent_log_cutoff = datetime.fromtimestamp(joined_at - 5, timezone.utc)
+        tail_biome = detect_biome_from_log_text(
+            read_tail_text(log_path),
+            min_time=recent_log_cutoff,
+        )
+        if tail_biome:
+            if normalize_biome_name(tail_biome) == expected_norm:
+                self._confirm_biome_session(expected_biome)
+            else:
+                print(
+                    f"[Log Scanner] Latest known log biome is {tail_biome}; "
+                    f"waiting for fresh {expected_biome} confirmation."
+                )
+
+        try:
+            last_pos = os.path.getsize(log_path)
+        except OSError:
+            last_pos = 0
+
+        while self.is_running and not stop_event.is_set():
+            if self.active_biome_session != expected_biome:
+                return
+
+            try:
+                current_size = os.path.getsize(log_path)
+
+                if current_size < last_pos:
+                    print("[Log Scanner] Active Roblox log rotated; re-identifying log.")
+                    log_path = identify_roblox_log(self.roblox_cookie)
+                    if not log_path:
+                        time.sleep(0.5)
+                        continue
+                    self.assigned_log = log_path
+                    last_pos = 0
+                    current_size = os.path.getsize(log_path)
+
+                if current_size > last_pos:
+                    with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                        f.seek(last_pos)
+                        new_data = f.read(current_size - last_pos)
+                    last_pos = current_size
+
+                    detected_biome = detect_biome_from_log_text(new_data)
+                    if detected_biome:
+                        if normalize_biome_name(detected_biome) == expected_norm:
+                            self._confirm_biome_session(expected_biome)
+                        elif self.log_biome_confirmed:
+                            self._finish_biome_session(
+                                expected_biome,
+                                reason="ended",
+                                observed_biome=detected_biome,
+                            )
+                            return
+                        else:
+                            self._finish_biome_session(
+                                expected_biome,
+                                reason="fake",
+                                observed_biome=detected_biome,
+                                detail="Roblox reported a different active biome",
+                            )
+                            return
+
+                if not self.log_biome_confirmed and time.time() - joined_at > LOG_JOIN_CONFIRM_TIMEOUT:
+                    self._finish_biome_session(
+                        expected_biome,
+                        reason="fake",
+                        observed_biome=None,
+                        detail="Timed out waiting for log confirmation",
+                    )
+                    return
+
+                time.sleep(LOG_POLL_INTERVAL)
+
+            except Exception as e:
+                print(f"[Log Scanner] Error while monitoring biome log: {e}")
+                time.sleep(0.5)
+
+    def _confirm_biome_session(self, biome):
+        if self.log_biome_confirmed:
+            return
+
+        self.log_biome_confirmed = True
+        print(f"[Log Scanner] Confirmed active biome from Roblox logs: {biome}")
+        if self.ui_reference:
+            self.ui_reference.update_status(f"Fishing in {biome}...")
+        if self.webhook_url:
+            from webhook import Webhook
+            Webhook(self.webhook_url).send_biome_joined(biome)
+
+    def _finish_biome_session(self, biome, reason, observed_biome=None, detail=None):
+        with self.log_monitor_lock:
+            if self.active_biome_session != biome:
+                return
+
+            self.active_biome_session = None
+            self.log_biome_confirmed = False
+            self.log_monitor_stop.set()
+
+        if self.fish_loop:
+            self.fish_loop.toggle_off()
+
+        if reason == "ended":
+            observed = f" New biome: {observed_biome}." if observed_biome else ""
+            print(f"[Log Scanner] Biome ended: {biome}.{observed} Resuming Discord scan.")
+            if self.webhook_url:
+                from webhook import Webhook
+                Webhook(self.webhook_url).send_biome_ended(biome)
+        else:
+            observed = f" Observed: {observed_biome}." if observed_biome else ""
+            extra = f" {detail}." if detail else ""
+            print(f"[Log Scanner] Fake biome detected for {biome}.{observed}{extra} Resuming Discord scan.")
+
+        if self.ui_reference:
+            self.ui_reference.update_status("Scanning for biomes...")
+
     def load_settings(self, token, biomes, cookie, mappings, webhook_url, ui_ref=None):
         self.token = token
-        self.selected_biomes = biomes
+        self.selected_biomes = [canonical_biome_title(biome) for biome in biomes]
         self.roblox_cookie = cookie
         self.guild_mappings = mappings
         self.webhook_url = webhook_url
@@ -380,7 +776,8 @@ class Scanner(discord.Client):
     def toggle_on(self):
         print("[Discord Scanner] Started")
         self.is_running = True
-        self.scanner_paused_until = 0  # Clear any pause when starting
+        self.active_biome_session = None
+        self.log_biome_confirmed = False
         if self.ui_reference:
             self.ui_reference.update_status("Scanning for biomes...")
 
@@ -388,45 +785,21 @@ class Scanner(discord.Client):
         print("[Discord Scanner] Paused")
         self.is_running = False
         self.active_biome_session = None
-        self.scanner_paused_until = 0
+        self.log_biome_confirmed = False
+        self.log_monitor_stop.set()
 
     def start_scanner(self):
         """Start the Discord scanner"""
-        import threading
-        if not self.monitor_thread:
-            self.monitor_thread = threading.Thread(target=self._monitor_pause, daemon=True)
-            self.monitor_thread.start()
-
         if self.token:
             print("Starting Discord scanner...")
             self.run(self.token)
         else:
             print("No Discord token provided. Scanner not started.")
 
-    def _monitor_pause(self):
-        """Background thread to monitor scanner pause and trigger webhook on end"""
-        import time
-        while True:
-            time.sleep(1)
-            if self.is_running and self.scanner_paused_until > 0:
-                if time.time() >= self.scanner_paused_until:
-                    # Pause is over!
-                    self.scanner_paused_until = 0
-                    if self.webhook_url and self.active_biome_session:
-                        from webhook import Webhook
-                        Webhook(self.webhook_url).send_biome_ended(self.active_biome_session)
-                    self.active_biome_session = None
-                    print("[Discord Scanner] Resuming active background scan")
-                    if self.ui_reference:
-                        self.ui_reference.update_status("Scanning for biomes...")
 
-
-intents = discord.Intents.default()
-intents.message_content = True
 
 # Global instance
 scanner = Scanner(
-    intents=intents,
     chunk_guilds_at_startup=False,
     member_cache_flags=discord.MemberCacheFlags.none(),
 )
