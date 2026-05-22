@@ -297,6 +297,11 @@ class FishSniperUI(ctk.CTk):
         entry_frame = ctk.CTkFrame(self.guild_scroll_frame)
         entry_frame.pack(fill="x", padx=5, pady=5)
 
+        name_label = ctk.CTkLabel(entry_frame, text="Server Name (Optional):", font=("Helvetica", 9))
+        name_label.pack(anchor="w")
+        name_entry = ctk.CTkEntry(entry_frame, placeholder_text="e.g. My Server", width=200, height=28)
+        name_entry.pack(fill="x", padx=0, pady=(0, 5))
+
         guild_label = ctk.CTkLabel(entry_frame, text="Server ID:", font=("Helvetica", 9))
         guild_label.pack(anchor="w")
         guild_entry = ctk.CTkEntry(entry_frame, placeholder_text="Guild ID", width=200, height=28)
@@ -305,14 +310,19 @@ class FishSniperUI(ctk.CTk):
         channels_label = ctk.CTkLabel(entry_frame, text="Channel IDs (comma-separated):", font=("Helvetica", 9))
         channels_label.pack(anchor="w")
         channels_entry = ctk.CTkEntry(entry_frame, placeholder_text="CH1, CH2, CH3", width=200, height=28)
-        channels_entry.pack(fill="x", padx=0, pady=(0, 3))
+        channels_entry.pack(fill="x", padx=0, pady=(0, 5))
 
-        self.guild_entries.append((guild_entry, channels_entry))
+        categories_label = ctk.CTkLabel(entry_frame, text="Category IDs (comma-separated):", font=("Helvetica", 9))
+        categories_label.pack(anchor="w")
+        categories_entry = ctk.CTkEntry(entry_frame, placeholder_text="CAT1, CAT2", width=200, height=28)
+        categories_entry.pack(fill="x", padx=0, pady=(0, 3))
+
+        self.guild_entries.append((name_entry, guild_entry, channels_entry, categories_entry))
 
     def remove_guild_entry(self):
         """Remove the last guild+channels entry row"""
         if len(self.guild_entries) > 1:  # Keep at least one
-            guild_entry, channels_entry = self.guild_entries.pop()
+            name_entry, guild_entry, channels_entry, categories_entry = self.guild_entries.pop()
             guild_entry.master.destroy()
         else:
             print("[UI] Cannot remove the last server entry")
@@ -372,7 +382,16 @@ class FishSniperUI(ctk.CTk):
                     if i >= len(self.guild_entries):
                         self.add_guild_entry()
                     
-                    guild_entry, channels_entry = self.guild_entries[i]
+                    name_entry, guild_entry, channels_entry, categories_entry = self.guild_entries[i]
+                    
+                    if 'server_name' in mapping:
+                        name_entry.delete(0, 'end')
+                        name_entry.insert(0, mapping['server_name'])
+                    elif 'name' in mapping:
+                        name_entry.delete(0, 'end')
+                        name_entry.insert(0, mapping['name'])
+                    else:
+                        name_entry.delete(0, 'end')
                     
                     if 'guild_id' in mapping:
                         guild_entry.delete(0, 'end')
@@ -382,6 +401,13 @@ class FishSniperUI(ctk.CTk):
                         channels = ', '.join(map(str, mapping['channel_ids']))
                         channels_entry.delete(0, 'end')
                         channels_entry.insert(0, channels)
+
+                    if 'category_ids' in mapping:
+                        categories = ', '.join(map(str, mapping['category_ids']))
+                        categories_entry.delete(0, 'end')
+                        categories_entry.insert(0, categories)
+                    else:
+                        categories_entry.delete(0, 'end')
 
             print("[Settings] Settings loaded successfully from LOCALAPPDATA")
         except Exception as e:
@@ -412,17 +438,21 @@ class FishSniperUI(ctk.CTk):
         
         # Parse all guild entries and convert to mappings
         guild_mappings = []
-        for guild_entry, channels_entry in self.guild_entries:
+        for name_entry, guild_entry, channels_entry, categories_entry in self.guild_entries:
+            server_name = name_entry.get().strip()
             guild_id = guild_entry.get().strip()
             channels_str = channels_entry.get().strip()
+            categories_str = categories_entry.get().strip()
             
             if guild_id:  # Only add if guild ID is provided
                 channel_ids = [ch.strip() for ch in channels_str.split(',') if ch.strip()]
+                category_ids = [cat.strip() for cat in categories_str.split(',') if cat.strip()]
                 
                 guild_mappings.append({
+                    "server_name": server_name,
                     "guild_id": guild_id,
                     "channel_ids": channel_ids,
-                    "category_ids": []
+                    "category_ids": category_ids
                 })
 
         # Sync values inside running Scanner Thread instance
@@ -459,16 +489,20 @@ class FishSniperUI(ctk.CTk):
         
         # Parse guild mappings
         guild_mappings = []
-        for guild_entry, channels_entry in self.guild_entries:
+        for name_entry, guild_entry, channels_entry, categories_entry in self.guild_entries:
+            server_name = name_entry.get().strip()
             guild_id = guild_entry.get().strip()
             channels_str = channels_entry.get().strip()
+            categories_str = categories_entry.get().strip()
             
             if guild_id:
                 channel_ids = [ch.strip() for ch in channels_str.split(',') if ch.strip()]
+                category_ids = [cat.strip() for cat in categories_str.split(',') if cat.strip()]
                 guild_mappings.append({
+                    "server_name": server_name,
                     "guild_id": guild_id,
                     "channel_ids": channel_ids,
-                    "category_ids": []
+                    "category_ids": category_ids
                 })
 
         scanner.load_settings(ds_token, selected_biomes, rb_token, guild_mappings, webhook_url, self)

@@ -3,10 +3,15 @@ import pyautogui
 import pydirectinput
 from PIL import ImageGrab
 import win32gui
-import win32com.client
 import win32con
 import ctypes
-import pygetwindow as gw
+
+# Force Windows to run the script at 100% Display Scaling.
+# If a user's Windows display settings are at 125% or 150%, PyAutoGUI will click the wrong spots.
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except Exception:
+    pass
 
 COORDS = {
     "1080p": {
@@ -104,39 +109,12 @@ PATHING_TIMINGS = {
     }
 }
 
-ALIGNMENT1 = 4.2
-ALIGNMENT2 = 0.6
-ALIGNMENT3 = 0.4
-MERCHANT1 = 0.25
-MERCHANT2 = 0.8
-MERCHANT3 = 1.2
-MERCHANT4 = 0.2
-SPOT1 = 6.4
-
-CAST_ROD_POS = COORDS["1080p"]["FISHING"]["CAST_ROD"]
-BITE_INDICATOR_POS = COORDS["1080p"]["FISHING"]["BITE_INDICATOR"]
-BAR_COLOR_POS = COORDS["1080p"]["FISHING"]["BAR_COLOR"]
-CLAIM_FISH_POS = COORDS["1080p"]["FISHING"]["CLAIM_FISH"]
-MINIGAME_REGION = COORDS["1080p"]["FISHING"]["MINIGAME_REGION"]
-
-CAMERA_SETUP_1 = COORDS["1080p"]["MERCHANT"]["CAMERA_SETUP_1"]
-CAMERA_SETUP_2 = COORDS["1080p"]["MERCHANT"]["CAMERA_SETUP_2"]
-OPEN_MERCHANT_1 = COORDS["1080p"]["MERCHANT"]["OPEN_MERCHANT_1"]
-OPEN_MERCHANT_2 = COORDS["1080p"]["MERCHANT"]["OPEN_MERCHANT_2"]
-SELECT_FISH = COORDS["1080p"]["MERCHANT"]["SELECT_FISH"]
-SELL_ALL_ON = COORDS["1080p"]["MERCHANT"]["SELL_ALL_ON"]
-SELL_ALL_OFF = COORDS["1080p"]["MERCHANT"]["SELL_ALL_OFF"]
-CONFIRM_SELL = COORDS["1080p"]["MERCHANT"]["CONFIRM_SELL"]
-CLOSE_MERCHANT = COORDS["1080p"]["MERCHANT"]["CLOSE_MERCHANT"]
-
-START_BUTTON_POS = COORDS["1080p"]["START"]["START_BUTTON_POS"]
-
 TOLERANCE = 10
 MAX_WAIT_FOR_BITE = 35
 MAX_MINIGAME_TIME = 10
 MAX_WAIT_FOR_CAST = 35
 
-# User-configurable start button detection values. Adjust if bot fails to detect the start button on new server loads.
+# User-configurable start button detection values.
 START_BUTTON_COLOR = (127, 255, 147)
 START_BUTTON_COLOR_TOLERANCE = 15
 START_BUTTON_WAIT_TIMEOUT = 120
@@ -147,12 +125,21 @@ class FishSolBot:
         self.should_exit = False
         self.has_done_initial_pathing = False  
         
-        # Change this to True!
         self.is_waiting_for_start_button = True 
         
         self.catch_count = 0
         self.max_catches = 1
         self.sell_loops = 22
+        
+        # Initialize default variables (Replaces all the global variables)
+        self.update_coordinates("1080p", "Normal")
+
+    def get_pixel_color(self, x, y):
+        """
+        Performance fix: Grabbing a 1x1 bounding box using PIL is exponentially 
+        faster than calling pyautogui.pixel() which screenshots the whole screen.
+        """
+        return ImageGrab.grab(bbox=(x, y, x + 1, y + 1)).getpixel((0, 0))
 
     def colors_match(self, c1, c2, tol=TOLERANCE):
         return (abs(c1[0] - c2[0]) <= tol and 
@@ -187,45 +174,39 @@ class FishSolBot:
             return False
     
     def update_coordinates(self, resolution, speed="Normal", max_catches=1, sell_loops=22):
-        global CAST_ROD_POS, BITE_INDICATOR_POS, BAR_COLOR_POS, CLAIM_FISH_POS, MINIGAME_REGION
-        global CAMERA_SETUP_1, CAMERA_SETUP_2, OPEN_MERCHANT_1, OPEN_MERCHANT_2, SELECT_FISH
-        global SELL_ALL_ON, SELL_ALL_OFF, CONFIRM_SELL, CLOSE_MERCHANT, START_BUTTON_POS
-        
-        global ALIGNMENT1, ALIGNMENT2, ALIGNMENT3, MERCHANT1, MERCHANT2, MERCHANT3, MERCHANT4, SPOT1
-
         self.max_catches = int(max_catches)
         self.sell_loops = int(sell_loops)
 
         if speed.upper() in PATHING_TIMINGS:
             timing = PATHING_TIMINGS[speed.upper()]
-            ALIGNMENT1 = timing["ALIGNMENT1"]
-            ALIGNMENT2 = timing["ALIGNMENT2"]
-            ALIGNMENT3 = timing["ALIGNMENT3"]
-            MERCHANT1 = timing["MERCHANT1"]
-            MERCHANT2 = timing["MERCHANT2"]
-            MERCHANT3 = timing["MERCHANT3"]
-            MERCHANT4 = timing["MERCHANT4"]
-            SPOT1 = timing["SPOT1"]
+            self.ALIGNMENT1 = timing["ALIGNMENT1"]
+            self.ALIGNMENT2 = timing["ALIGNMENT2"]
+            self.ALIGNMENT3 = timing["ALIGNMENT3"]
+            self.MERCHANT1 = timing["MERCHANT1"]
+            self.MERCHANT2 = timing["MERCHANT2"]
+            self.MERCHANT3 = timing["MERCHANT3"]
+            self.MERCHANT4 = timing["MERCHANT4"]
+            self.SPOT1 = timing["SPOT1"]
             print(f"[System] Pathing timings updated to {speed}")
 
         if resolution in COORDS:
-            CAST_ROD_POS = COORDS[resolution]["FISHING"]["CAST_ROD"]
-            BITE_INDICATOR_POS = COORDS[resolution]["FISHING"]["BITE_INDICATOR"]
-            BAR_COLOR_POS = COORDS[resolution]["FISHING"]["BAR_COLOR"]
-            CLAIM_FISH_POS = COORDS[resolution]["FISHING"]["CLAIM_FISH"]
-            MINIGAME_REGION = COORDS[resolution]["FISHING"]["MINIGAME_REGION"]
+            self.CAST_ROD_POS = COORDS[resolution]["FISHING"]["CAST_ROD"]
+            self.BITE_INDICATOR_POS = COORDS[resolution]["FISHING"]["BITE_INDICATOR"]
+            self.BAR_COLOR_POS = COORDS[resolution]["FISHING"]["BAR_COLOR"]
+            self.CLAIM_FISH_POS = COORDS[resolution]["FISHING"]["CLAIM_FISH"]
+            self.MINIGAME_REGION = COORDS[resolution]["FISHING"]["MINIGAME_REGION"]
             
-            CAMERA_SETUP_1 = COORDS[resolution]["MERCHANT"]["CAMERA_SETUP_1"]
-            CAMERA_SETUP_2 = COORDS[resolution]["MERCHANT"]["CAMERA_SETUP_2"]
-            OPEN_MERCHANT_1 = COORDS[resolution]["MERCHANT"]["OPEN_MERCHANT_1"]
-            OPEN_MERCHANT_2 = COORDS[resolution]["MERCHANT"]["OPEN_MERCHANT_2"]
-            SELECT_FISH = COORDS[resolution]["MERCHANT"]["SELECT_FISH"]
-            SELL_ALL_ON = COORDS[resolution]["MERCHANT"]["SELL_ALL_ON"]
-            SELL_ALL_OFF = COORDS[resolution]["MERCHANT"]["SELL_ALL_OFF"]
-            CONFIRM_SELL = COORDS[resolution]["MERCHANT"]["CONFIRM_SELL"]
-            CLOSE_MERCHANT = COORDS[resolution]["MERCHANT"]["CLOSE_MERCHANT"]
+            self.CAMERA_SETUP_1 = COORDS[resolution]["MERCHANT"]["CAMERA_SETUP_1"]
+            self.CAMERA_SETUP_2 = COORDS[resolution]["MERCHANT"]["CAMERA_SETUP_2"]
+            self.OPEN_MERCHANT_1 = COORDS[resolution]["MERCHANT"]["OPEN_MERCHANT_1"]
+            self.OPEN_MERCHANT_2 = COORDS[resolution]["MERCHANT"]["OPEN_MERCHANT_2"]
+            self.SELECT_FISH = COORDS[resolution]["MERCHANT"]["SELECT_FISH"]
+            self.SELL_ALL_ON = COORDS[resolution]["MERCHANT"]["SELL_ALL_ON"]
+            self.SELL_ALL_OFF = COORDS[resolution]["MERCHANT"]["SELL_ALL_OFF"]
+            self.CONFIRM_SELL = COORDS[resolution]["MERCHANT"]["CONFIRM_SELL"]
+            self.CLOSE_MERCHANT = COORDS[resolution]["MERCHANT"]["CLOSE_MERCHANT"]
 
-            START_BUTTON_POS = COORDS[resolution]["START"]["START_BUTTON_POS"]
+            self.START_BUTTON_POS = COORDS[resolution]["START"]["START_BUTTON_POS"]
             print(f"[System] Coordinates updated to {resolution}")
 
     def reset_character(self):
@@ -240,15 +221,15 @@ class FishSolBot:
 
     def setup_camera(self):
         print("[Pathing] Setting up camera orientation...")
-        pydirectinput.moveTo(CAMERA_SETUP_1[0], CAMERA_SETUP_1[1])
+        pydirectinput.moveTo(self.CAMERA_SETUP_1[0], self.CAMERA_SETUP_1[1])
         time.sleep(0.1)
-        pydirectinput.moveTo(CAMERA_SETUP_1[0], CAMERA_SETUP_1[1] - 10, duration=0.2)
+        pydirectinput.moveTo(self.CAMERA_SETUP_1[0], self.CAMERA_SETUP_1[1] - 3, duration=0.2)
         time.sleep(0.22)
         pydirectinput.click()
         time.sleep(0.22)
-        pydirectinput.moveTo(CAMERA_SETUP_2[0], CAMERA_SETUP_2[1])
+        pydirectinput.moveTo(self.CAMERA_SETUP_2[0], self.CAMERA_SETUP_2[1])
         time.sleep(0.1)
-        pydirectinput.moveTo(CAMERA_SETUP_2[0], CAMERA_SETUP_2[1] - 10, duration=0.2)
+        pydirectinput.moveTo(self.CAMERA_SETUP_2[0], self.CAMERA_SETUP_2[1] - 3, duration=0.2)
         time.sleep(0.22)
         pydirectinput.click()
         time.sleep(0.22)
@@ -271,37 +252,37 @@ class FishSolBot:
         print("[Pathing] Walking to merchant...")
         pydirectinput.keyDown('w')
         pydirectinput.keyDown('a')
-        time.sleep(ALIGNMENT1)
+        time.sleep(self.ALIGNMENT1)
         if not self.is_running: 
             pydirectinput.keyUp('w'); pydirectinput.keyUp('a')
             return
             
         pydirectinput.keyUp('w')
-        time.sleep(ALIGNMENT2)
+        time.sleep(self.ALIGNMENT2)
         pydirectinput.keyUp('a')
         time.sleep(0.2)
         
         pydirectinput.keyDown('w')
-        time.sleep(ALIGNMENT3)
+        time.sleep(self.ALIGNMENT3)
         pydirectinput.keyUp('w')
         time.sleep(0.3)
         
         pydirectinput.keyDown('d')
-        time.sleep(MERCHANT1)
+        time.sleep(self.MERCHANT1)
         pydirectinput.keyUp('d')
         time.sleep(0.15)
         
         pydirectinput.keyDown('w')
-        time.sleep(MERCHANT2)
+        time.sleep(self.MERCHANT2)
         pydirectinput.keyDown('space')
-        time.sleep(MERCHANT3)
+        time.sleep(self.MERCHANT3)
         pydirectinput.keyUp('w')
         pydirectinput.keyUp('space')
         time.sleep(0.3)
         
         pydirectinput.keyDown('a')
         pydirectinput.keyDown('w')
-        time.sleep(MERCHANT4)
+        time.sleep(self.MERCHANT4)
         pydirectinput.keyUp('a')
         pydirectinput.keyUp('w')
         time.sleep(0.2)
@@ -312,8 +293,8 @@ class FishSolBot:
         time.sleep(0.3)
         pydirectinput.keyUp('e')
         time.sleep(0.3)
-        pydirectinput.moveTo(OPEN_MERCHANT_1[0], OPEN_MERCHANT_1[1] - 50)
-        pydirectinput.moveTo(OPEN_MERCHANT_1[0], OPEN_MERCHANT_1[1], duration=0.2)
+        pydirectinput.moveTo(self.OPEN_MERCHANT_1[0], self.OPEN_MERCHANT_1[1] - 50)
+        pydirectinput.moveTo(self.OPEN_MERCHANT_1[0], self.OPEN_MERCHANT_1[1], duration=0.2)
         time.sleep(0.1)
         pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
         time.sleep(0.2)
@@ -321,15 +302,15 @@ class FishSolBot:
         while True:
             if not self.is_running: return
             
-            pydirectinput.moveTo(OPEN_MERCHANT_2[0], OPEN_MERCHANT_2[1] - 10)
-            pydirectinput.moveTo(OPEN_MERCHANT_2[0], OPEN_MERCHANT_2[1], duration=0.2)
+            pydirectinput.moveTo(self.OPEN_MERCHANT_2[0], self.OPEN_MERCHANT_2[1] - 3)
+            pydirectinput.moveTo(self.OPEN_MERCHANT_2[0], self.OPEN_MERCHANT_2[1], duration=0.2)
             time.sleep(0.1)
 
             pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
             time.sleep(0.2)
             
             try:
-                current_color = pyautogui.pixel(*OPEN_MERCHANT_2)
+                current_color = self.get_pixel_color(*self.OPEN_MERCHANT_2)
                 if self.colors_match(current_color, (47, 165, 255), tol=15):
                     print("[Auto-Sell] Merchant 2 click failed (detected blue color). Retrying...")
                     time.sleep(0.1)
@@ -344,38 +325,38 @@ class FishSolBot:
         for _ in range(self.sell_loops):  
             if not self.is_running: return
             
-            pydirectinput.moveTo(SELECT_FISH[0], SELECT_FISH[1] - 50)
-            pydirectinput.moveTo(SELECT_FISH[0], SELECT_FISH[1], duration=0.2)
-            pydirectinput.moveTo(SELECT_FISH[0] - 10, SELECT_FISH[1], duration=0.1)
+            pydirectinput.moveTo(self.SELECT_FISH[0], self.SELECT_FISH[1] - 50)
+            pydirectinput.moveTo(self.SELECT_FISH[0], self.SELECT_FISH[1], duration=0.2)
+            pydirectinput.moveTo(self.SELECT_FISH[0] - 3, self.SELECT_FISH[1], duration=0.1)
             time.sleep(0.1)
             pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
             time.sleep(0.2)
             
-            pydirectinput.moveTo(SELL_ALL_ON[0], SELL_ALL_ON[1] - 50)
-            pydirectinput.moveTo(SELL_ALL_ON[0], SELL_ALL_ON[1], duration=0.2)
-            pydirectinput.moveTo(SELL_ALL_ON[0] - 10, SELL_ALL_ON[1], duration=0.2)
+            pydirectinput.moveTo(self.SELL_ALL_ON[0], self.SELL_ALL_ON[1] - 50)
+            pydirectinput.moveTo(self.SELL_ALL_ON[0], self.SELL_ALL_ON[1], duration=0.2)
+            pydirectinput.moveTo(self.SELL_ALL_ON[0] - 3, self.SELL_ALL_ON[1], duration=0.2)
             time.sleep(0.1)
             pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
             time.sleep(0.3)
             
-            pydirectinput.moveTo(CONFIRM_SELL[0], CONFIRM_SELL[1] - 50)
-            pydirectinput.moveTo(CONFIRM_SELL[0], CONFIRM_SELL[1], duration=0.2)
-            pydirectinput.moveTo(CONFIRM_SELL[0] - 10, CONFIRM_SELL[1], duration=0.2)
+            pydirectinput.moveTo(self.CONFIRM_SELL[0], self.CONFIRM_SELL[1] - 50)
+            pydirectinput.moveTo(self.CONFIRM_SELL[0], self.CONFIRM_SELL[1], duration=0.2)
+            pydirectinput.moveTo(self.CONFIRM_SELL[0] - 3, self.CONFIRM_SELL[1], duration=0.2)
             time.sleep(0.1)
             pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
             time.sleep(1.0)
 
     def walk_back_to_spot(self):
         print("[Pathing] Walking from merchant to fishing spot...")
-        pydirectinput.moveTo(CLOSE_MERCHANT[0], CLOSE_MERCHANT[1]-10)
+        pydirectinput.moveTo(self.CLOSE_MERCHANT[0], self.CLOSE_MERCHANT[1]-3)
         time.sleep(0.2)
-        pydirectinput.moveTo(CLOSE_MERCHANT[0], CLOSE_MERCHANT[1], duration=0.2)
+        pydirectinput.moveTo(self.CLOSE_MERCHANT[0], self.CLOSE_MERCHANT[1], duration=0.2)
         time.sleep(0.1)
         pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
         time.sleep(0.2)
         
         pydirectinput.keyDown('a')
-        time.sleep(SPOT1)
+        time.sleep(self.SPOT1)
         pydirectinput.keyUp('a')
 
     def do_pathing_routine(self, do_sell=True):
@@ -392,7 +373,8 @@ class FishSolBot:
             if not self.is_running: return
             
         self.walk_back_to_spot()
-        self.catch_count = 0
+        if do_sell:
+            self.catch_count = 0
         print("=== PATHING COMPLETE. READY TO FISH ===")
 
     def play_fishing_cycle(self):
@@ -400,13 +382,13 @@ class FishSolBot:
 
         # 0A. New Server Load Wait / Start Button Verification
         if self.is_waiting_for_start_button:
-            if START_BUTTON_POS == (0, 0):
+            if self.START_BUTTON_POS == (0, 0):
                 print("[Fishing Bot] Warning: Start coordinates default. Bypassing check.")
                 self.is_waiting_for_start_button = False
                 return
 
             print("[Fishing Bot] Waiting 10 seconds for Roblox to load before checking for Start button...")
-            for _ in range(20):  # 10 seconds, checking is_running every 0.5s
+            for _ in range(20):
                 if not self.is_running: return
                 time.sleep(0.5)
 
@@ -414,43 +396,41 @@ class FishSolBot:
             wait_start = time.time()
             button_clicked = False
 
-            # Wait up to 60 seconds for the start button to appear
             while time.time() - wait_start < 60:
-                if not self.is_running: return # Exit if user pauses
+                if not self.is_running: return
                 
                 try:
-                    current_color = pyautogui.pixel(*START_BUTTON_POS)
+                    current_color = self.get_pixel_color(*self.START_BUTTON_POS)
                     print(f"[Fishing Bot] Detected color at start button: {current_color}")
-                    print(str(START_BUTTON_POS))
+                    
                     if self.colors_match(current_color, START_BUTTON_COLOR, tol=START_BUTTON_COLOR_TOLERANCE):
                         print("[Fishing Bot] Play/Start Button detected! Waiting 2 seconds before clicking...")
                         time.sleep(2.0)
                         
-                        pydirectinput.moveTo(START_BUTTON_POS[0], START_BUTTON_POS[1] - 20)
+                        pydirectinput.moveTo(self.START_BUTTON_POS[0], self.START_BUTTON_POS[1] - 20)
                         time.sleep(0.1)
-                        pydirectinput.moveTo(*START_BUTTON_POS, duration=0.2)
+                        pydirectinput.moveTo(*self.START_BUTTON_POS, duration=0.2)
                         time.sleep(0.1)
                         pydirectinput.mouseDown()
                         time.sleep(0.05)
                         pydirectinput.mouseUp()
                         
-                        time.sleep(3.0) # Give the game 3 seconds to render the player on the map
+                        time.sleep(3.0) 
                         button_clicked = True
-                        break # Successfully clicked, break out of the waiting loop
+                        break 
                 except Exception:
                     pass
                 
-                time.sleep(0.5) # Check twice a second
+                time.sleep(0.5) 
 
             if not button_clicked:
                 print("[Fishing Bot] Start button not found or timed out. Assuming already in-game.")
 
-            # Disable the start button check for the rest of the session
             self.is_waiting_for_start_button = False
             self.has_done_initial_pathing = False
             return
 
-        # 0B. Initial Pathing (Runs ONCE when joining a new server)
+        # 0B. Initial Pathing
         if not self.has_done_initial_pathing:
             print("Detected first run! Walking to fishing spot...")
             self.do_pathing_routine(do_sell=False) 
@@ -464,11 +444,11 @@ class FishSolBot:
             return
 
         # 1. Cast the fishing rod
-        pydirectinput.moveTo(CAST_ROD_POS[0], CAST_ROD_POS[1] - 50)
+        pydirectinput.moveTo(self.CAST_ROD_POS[0], self.CAST_ROD_POS[1] - 50)
         time.sleep(0.1)
-        pydirectinput.moveTo(CAST_ROD_POS[0], CAST_ROD_POS[1], duration=0.2)
+        pydirectinput.moveTo(self.CAST_ROD_POS[0], self.CAST_ROD_POS[1], duration=0.2)
         time.sleep(0.1)
-        pydirectinput.moveTo(CAST_ROD_POS[0]-10, CAST_ROD_POS[1], duration=0.1)
+        pydirectinput.moveTo(self.CAST_ROD_POS[0]-3, self.CAST_ROD_POS[1], duration=0.1)
         time.sleep(0.1)
         pydirectinput.mouseDown()
         time.sleep(0.05)
@@ -478,7 +458,7 @@ class FishSolBot:
         if not self.is_running:
             return
 
-        pixel = pyautogui.pixel(*CAST_ROD_POS)
+        pixel = self.get_pixel_color(*self.CAST_ROD_POS)
         if self.colors_match(pixel, (49, 49, 59), tol=20) or self.colors_match(pixel, (120,140,255), tol=5):
             print("Cast may have failed. Retrying...")
             pydirectinput.moveTo(10, 10)
@@ -493,11 +473,13 @@ class FishSolBot:
             if not self.is_running:
                 return
 
-            pixel = pyautogui.pixel(*BITE_INDICATOR_POS)
+            pixel = self.get_pixel_color(*self.BITE_INDICATOR_POS)
             if self.colors_match(pixel, (255, 255, 255), tol=5):
                 pyautogui.moveTo(950, 880)
-                time.sleep(0.05)
-                bar_color = pyautogui.pixel(*BAR_COLOR_POS)
+                
+                # Wait 0.5s for the minigame UI to pop up before sampling its color
+                time.sleep(0.5) 
+                bar_color = self.get_pixel_color(*self.BAR_COLOR_POS)
                 print(f"Bite! Bar color detected: {bar_color}")
                 break
 
@@ -507,9 +489,9 @@ class FishSolBot:
             time.sleep(1.5)
             pydirectinput.moveTo(10, 10)
             time.sleep(0.1)
-            pydirectinput.moveTo(CLAIM_FISH_POS[0], CLAIM_FISH_POS[1] - 50)
+            pydirectinput.moveTo(self.CLAIM_FISH_POS[0], self.CLAIM_FISH_POS[1] - 50)
             time.sleep(0.1)
-            pydirectinput.moveTo(*CLAIM_FISH_POS, duration=0.2)
+            pydirectinput.moveTo(*self.CLAIM_FISH_POS, duration=0.2)
             time.sleep(0.3)
             pydirectinput.mouseDown()
             time.sleep(0.1)
@@ -518,7 +500,7 @@ class FishSolBot:
             print("Fishing timeout or no bite detected. Retrying...")
             return
 
-        # 3. Mini-game
+        # 3. Mini-game (Reverted to clicks, keeping ImageGrab + CPU sleep)
         print("Playing mini-game...")
         minigame_start = time.time()
 
@@ -526,13 +508,15 @@ class FishSolBot:
             if not self.is_running:
                 return
 
-            img = pyautogui.screenshot(region=MINIGAME_REGION)
+            # Grab just the minigame region. (Much faster than whole screen)
+            x, y, w, h = self.MINIGAME_REGION
+            img = ImageGrab.grab(bbox=(x, y, x + w, y + h))
             pixels = img.load()
 
             bar_found = False
-            for x in range(0, img.width, 3):
-                for y in range(0, img.height, 3):
-                    if self.colors_match(pixels[x, y], bar_color):
+            for img_x in range(0, img.width, 3):
+                for img_y in range(0, img.height, 3):
+                    if self.colors_match(pixels[img_x, img_y], bar_color):
                         bar_found = True
                         break
                 if bar_found:
@@ -540,7 +524,11 @@ class FishSolBot:
 
             if not bar_found:
                 pydirectinput.click()
+                
+            # Crucial: Prevent 100% CPU lockup and input thread queueing
+            time.sleep(0.01) 
 
+        # The original code had a mouseUp here as a safety fallback
         pydirectinput.mouseUp()
 
         # 4. Claim fish
@@ -548,11 +536,11 @@ class FishSolBot:
         time.sleep(1.5)
         pydirectinput.moveTo(10, 10)
         time.sleep(0.1)
-        pydirectinput.moveTo(CLAIM_FISH_POS[0], CLAIM_FISH_POS[1] - 50)
+        pydirectinput.moveTo(self.CLAIM_FISH_POS[0], self.CLAIM_FISH_POS[1] - 50)
         time.sleep(0.1)
-        pydirectinput.moveTo(*CLAIM_FISH_POS, duration=0.2)
+        pydirectinput.moveTo(*self.CLAIM_FISH_POS, duration=0.2)
         time.sleep(0.3)
-        pydirectinput.moveTo(CLAIM_FISH_POS[0]-10, CLAIM_FISH_POS[1], duration=0.1)
+        pydirectinput.moveTo(self.CLAIM_FISH_POS[0]-3, self.CLAIM_FISH_POS[1], duration=0.1)
         time.sleep(0.1)
         pydirectinput.mouseDown()
         time.sleep(0.1)
