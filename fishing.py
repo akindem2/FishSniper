@@ -88,24 +88,30 @@ COORDS = {
 
 PATHING_TIMINGS = {
     "VIP": {
-        "ALIGNMENT1": 4,
+        "ALIGNMENT1": 3.9,
+        "ALIGNMENT1.5":0.8,
         "ALIGNMENT2": 0.6,
         "ALIGNMENT3": 0.4,
         "MERCHANT1": 0.25,
         "MERCHANT2": 0.7,
         "MERCHANT3": 1.3,
         "MERCHANT4": 0.2,
-        "SPOT1": 6.4,
+        "MERCHANT5": 0.4,
+        "MERCHANT6": 1.35,
+        "SPOT1": 6.5,
     },
     "NORMAL": {
-        "ALIGNMENT1": 4.8,
+        "ALIGNMENT1": 5.0,
+        "ALIGNMENT1.5":0.96,
         "ALIGNMENT2": 0.72,
         "ALIGNMENT3": 0.48,
         "MERCHANT1": 0.3,
         "MERCHANT2": 0.96,
         "MERCHANT3": 1.44,
         "MERCHANT4": 0.24,
-        "SPOT1": 7.68,
+        "MERCHANT5": 0.5,
+        "MERCHANT6": 1.56,
+        "SPOT1": 8.1,
     }
 }
 
@@ -130,6 +136,7 @@ class FishSolBot:
         self.catch_count = 0
         self.max_catches = 1
         self.sell_loops = 22
+        self.cast_fail_count = 0
         
         # Initialize default variables (Replaces all the global variables)
         self.update_coordinates("1080p", "Normal")
@@ -177,17 +184,27 @@ class FishSolBot:
         self.max_catches = int(max_catches)
         self.sell_loops = int(sell_loops)
 
-        if speed.upper() in PATHING_TIMINGS:
-            timing = PATHING_TIMINGS[speed.upper()]
+        # Normalize and map speed/pathing mode strings
+        normalized_speed = speed.strip().upper()
+        if normalized_speed in ("VIP", "VIP PATHING"):
+            normalized_speed = "VIP"
+        elif normalized_speed in ("NON VIP", "NON VIP PATHING", "NORMAL"):
+            normalized_speed = "NORMAL"
+
+        if normalized_speed in PATHING_TIMINGS:
+            timing = PATHING_TIMINGS[normalized_speed]
             self.ALIGNMENT1 = timing["ALIGNMENT1"]
+            self.ALIGNMENT15 = timing["ALIGNMENT1.5"]
             self.ALIGNMENT2 = timing["ALIGNMENT2"]
             self.ALIGNMENT3 = timing["ALIGNMENT3"]
             self.MERCHANT1 = timing["MERCHANT1"]
             self.MERCHANT2 = timing["MERCHANT2"]
             self.MERCHANT3 = timing["MERCHANT3"]
             self.MERCHANT4 = timing["MERCHANT4"]
+            self.MERCHANT5 = timing["MERCHANT5"]
+            self.MERCHANT6 = timing["MERCHANT6"]
             self.SPOT1 = timing["SPOT1"]
-            print(f"[System] Pathing timings updated to {speed}")
+            print(f"[System] Pathing timings updated to {speed} (mapped to {normalized_speed})")
 
         if resolution in COORDS:
             self.CAST_ROD_POS = COORDS[resolution]["FISHING"]["CAST_ROD"]
@@ -244,7 +261,7 @@ class FishSolBot:
         # Zoom out slightly to optimal position
         for _ in range(7):
             if not self.is_running: return
-            pyautogui.scroll(-100)
+            pyautogui.scroll(-300)
             time.sleep(0.01)
         time.sleep(0.1)
 
@@ -274,18 +291,27 @@ class FishSolBot:
         
         pydirectinput.keyDown('w')
         time.sleep(self.MERCHANT2)
-        pydirectinput.keyDown('space')
+        #pydirectinput.keyDown('space')
         time.sleep(self.MERCHANT3)
         pydirectinput.keyUp('w')
+        pydirectinput.keyDown('s')
+        time.sleep(self.ALIGNMENT15)
+        pydirectinput.keyUp('s')
+        pydirectinput.keyDown('w')
+        time.sleep(self.MERCHANT5)
+        pydirectinput.keyDown('space')
+        time.sleep(self.MERCHANT6)
         pydirectinput.keyUp('space')
+        pydirectinput.keyUp('w')
+        #pydirectinput.keyUp('space')
         time.sleep(0.3)
         
-        pydirectinput.keyDown('a')
-        pydirectinput.keyDown('w')
-        time.sleep(self.MERCHANT4)
-        pydirectinput.keyUp('a')
-        pydirectinput.keyUp('w')
-        time.sleep(0.2)
+        #pydirectinput.keyDown('a')
+        #pydirectinput.keyDown('w')
+        #time.sleep(self.MERCHANT4)
+        #pydirectinput.keyUp('a')
+        #pydirectinput.keyUp('w')
+        #time.sleep(0.2)
 
     def sell_fish_logic(self):
         print("[Auto-Sell] Opening merchant UI...")
@@ -458,13 +484,6 @@ class FishSolBot:
         if not self.is_running:
             return
 
-        pixel = self.get_pixel_color(*self.CAST_ROD_POS)
-        if self.colors_match(pixel, (49, 49, 59), tol=20) or self.colors_match(pixel, (120,140,255), tol=5):
-            print("Cast may have failed. Retrying...")
-            pydirectinput.moveTo(10, 10)
-            time.sleep(0.1)
-            return
-
         start_wait = time.time()
         bar_color = None
 
@@ -497,7 +516,8 @@ class FishSolBot:
             time.sleep(0.1)
             pydirectinput.mouseUp()
             time.sleep(0.5)
-            print("Fishing timeout or no bite detected. Retrying...")
+            print("Fishing timeout or no bite detected. Retrying recovery pathing...")
+            self.do_pathing_routine(do_sell=False)
             return
 
         # 3. Mini-game (Reverted to clicks, keeping ImageGrab + CPU sleep)

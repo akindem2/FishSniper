@@ -118,10 +118,10 @@ class FishSniperUI(ctk.CTk):
         self.res_dropdown = ctk.CTkOptionMenu(self.sidebar_frame, values=["1080p", "1440p", "1366x768"], command=self.save_settings)
         self.res_dropdown.grid(row=4, column=0, padx=20, pady=(5, 10))
 
-        # Speed Dropdown
-        self.speed_label = ctk.CTkLabel(self.sidebar_frame, text="Pathing Speed:", font=self.normal_font)
+        # Speed Dropdown (Pathing Mode)
+        self.speed_label = ctk.CTkLabel(self.sidebar_frame, text="Pathing Mode:", font=self.normal_font)
         self.speed_label.grid(row=5, column=0, padx=20, pady=(20, 0))
-        self.speed_dropdown = ctk.CTkOptionMenu(self.sidebar_frame, values=["Normal", "VIP"], command=self.save_settings)
+        self.speed_dropdown = ctk.CTkOptionMenu(self.sidebar_frame, values=["Vip Pathing", "Non Vip Pathing"], command=self.save_settings)
         self.speed_dropdown.grid(row=6, column=0, padx=20, pady=(5, 10))
 
         # Max Fish
@@ -337,12 +337,18 @@ class FishSniperUI(ctk.CTk):
             return
 
         try:
-            # Load resolution and speed
+            # Load resolution and speed (Pathing Mode)
             if 'resolution' in settings:
                 self.res_dropdown.set(settings['resolution'])
                 
             if 'speed' in settings:
-                self.speed_dropdown.set(settings['speed'])
+                saved_speed = settings['speed']
+                # Migrate older speed values to new pathing options
+                if saved_speed == "VIP":
+                    saved_speed = "Vip Pathing"
+                elif saved_speed == "Normal":
+                    saved_speed = "Non Vip Pathing"
+                self.speed_dropdown.set(saved_speed)
 
             # Load tokens
             if 'rb_token' in settings:
@@ -478,7 +484,7 @@ class FishSniperUI(ctk.CTk):
         print(f"Roblox Cookie Entered: {'Yes' if len(rb_token) > 0 else 'No'}")
         print(f"Discord Token Entered: {'Yes' if len(ds_token) > 0 else 'No'}")
         print(f"Resolution: {res}")
-        print(f"Pathing Speed: {speed}")
+        print(f"Pathing Mode: {speed}")
         print(f"Monitoring Biomes: {selected_biomes}")
         print(f"Server Configurations: {len(guild_mappings)} rules loaded.")
 

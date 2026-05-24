@@ -14,7 +14,8 @@ MD_LINK_REGEX = r"\[.*?\]\((https?://[^\s)]+)\)"
 # If you ever support multiple games, make this configurable.
 DEFAULT_PLACE_ID = "15532962292"  # FishSol placeId (update if needed)
 
-LOG_JOIN_CONFIRM_TIMEOUT = 120
+LOG_JOIN_CONFIRM_TIMEOUT = 150
+LOG_SCANNER_START_DELAY = 10
 LOG_POLL_INTERVAL = 0.1
 
 BIOME_LOG_DATA = [
@@ -36,6 +37,9 @@ BIOME_LOG_DATA = [
 ]
 
 LOG_GAME_MARKERS = ("Sol's RNG", DEFAULT_PLACE_ID)
+BIOME_RPC_IMAGE_REGEX = re.compile(
+    r'\{\s*"hoverText"\s*:\s*"([A-Z0-9 ]+)"\s*,\s*"assetId"\s*:\s*(\d+)\s*\}'
+)
 
 
 def extract_text(message):
@@ -85,18 +89,41 @@ BIOME_TITLE_BY_NORMALIZED = {
     normalize_biome_name(biome["title"]): biome["title"] for biome in BIOME_LOG_DATA
 }
 
+_BIOME_TITLES_BY_ASSET_ID = {}
+for biome in BIOME_LOG_DATA:
+    _BIOME_TITLES_BY_ASSET_ID.setdefault(str(biome["asset id"]), set()).add(biome["title"])
+
 BIOME_TITLE_BY_ASSET_ID = {
-    str(biome["asset id"]): biome["title"] for biome in BIOME_LOG_DATA
+    asset_id: next(iter(titles))
+    for asset_id, titles in _BIOME_TITLES_BY_ASSET_ID.items()
+    if len(titles) == 1
 }
 
-BIOME_TITLE_BY_HOVER_TEXT = {
-    biome["name"].upper(): biome["title"] for biome in BIOME_LOG_DATA
-}
+BIOME_TITLE_BY_HOVER_TEXT = {}
+for biome in BIOME_LOG_DATA:
+    BIOME_TITLE_BY_HOVER_TEXT[biome["name"].upper()] = biome["title"]
+    BIOME_TITLE_BY_HOVER_TEXT[biome["title"].upper()] = biome["title"]
 
 
 def canonical_biome_title(name):
     normalized = normalize_biome_name(name)
     return BIOME_TITLE_BY_NORMALIZED.get(normalized, name)
+
+
+def resolve_biome_title_from_rpc(hover_text, asset_id):
+    hover_title = BIOME_TITLE_BY_HOVER_TEXT.get((hover_text or "").upper())
+    if hover_title:
+        return hover_title
+    return BIOME_TITLE_BY_ASSET_ID.get(str(asset_id))
+
+
+def detect_biome_from_rpc_line(line):
+    detected = None
+    for match in BIOME_RPC_IMAGE_REGEX.finditer(line):
+        detected_title = resolve_biome_title_from_rpc(match.group(1), match.group(2))
+        if detected_title:
+            detected = detected_title
+    return detected
 
 
 def read_first_5_mb(path):
@@ -188,7 +215,7 @@ def find_roblox_logs():
     return logs
 
 
-def get_roblox_username_from_cookie(cookie):
+def get_roblox_userid_from_cookie(cookie):
     if not cookie or not cookie.strip():
         return None
 
@@ -199,9 +226,9 @@ def get_roblox_username_from_cookie(cookie):
             timeout=5,
         )
         if res.status_code == 200:
-            return res.json().get("name")
+            return res.json().get("id")
     except Exception as e:
-        print(f"[Log Scanner] Could not resolve Roblox username from cookie: {e}")
+        print(f"[Log Scanner] Could not resolve Roblox userid from cookie: {e}")
 
     return None
 
@@ -212,41 +239,65 @@ def identify_roblox_log(cookie=None):
         print("[Log Scanner] No Roblox logs found.")
         return None
 
-    username = get_roblox_username_from_cookie(cookie)
-    if username:
-        print(f"[Log Scanner] Looking for active log for Roblox user: {username}")
+    userid = get_roblox_userid_from_cookie(cookie)
+    if userid:
+        print(f"[Log Scanner] Looking for active log for Roblox user ID: {userid}")
     else:
-        print("[Log Scanner] Roblox username unavailable; using most recent matching log.")
+        print("[Log Scanner] Roblox user ID unavailable; using most recent matching log.")
 
+    # Filter candidates to only logs that contain the game marker
     candidates = []
     for log_path in logs:
         data = read_first_5_mb(log_path)
-        has_user = not username or username in data
         has_game_marker = any(marker in data for marker in LOG_GAME_MARKERS)
-        if has_user and has_game_marker:
+        if has_game_marker:
             candidates.append(log_path)
 
-    if not candidates:
-        print("[Log Scanner] No game-specific log found; falling back to recent Roblox logs.")
-        candidates = logs[:5]
+    selected = None
 
+    # First pass: try to find a very recent log that also matches the user
     for path in candidates:
         last_line = read_last_valid_line(path)
         if not last_line:
             continue
-
         timestamp = last_line.split(",", 1)[0].strip()
         age = seconds_since(timestamp)
         if age is not None and age <= 120:
-            print(f"[Log Scanner] Assigned active Roblox log: {path.name}")
-            return path
+            if userid:
+                data = read_first_5_mb(path)
+                if str(userid) in data:
+                    print(f"[Log Scanner] Assigned active Roblox log for user ID {userid}: {path.name}")
+                    selected = path
+                    break
 
-    fallback = candidates[0]
-    print(f"[Log Scanner] No very recent timestamp found; using latest candidate: {fallback.name}")
+    # Second pass: try to find any very recent log with the game marker
+    if not selected:
+        for path in candidates:
+            last_line = read_last_valid_line(path)
+            if not last_line:
+                continue
+            timestamp = last_line.split(",", 1)[0].strip()
+            age = seconds_since(timestamp)
+            if age is not None and age <= 120:
+                print(f"[Log Scanner] Assigned active Roblox log: {path.name}")
+                selected = path
+                break
+
+    if selected:
+        return selected
+
+    if candidates:
+        fallback = candidates[0]
+        print(f"[Log Scanner] No very recent timestamp found; using latest game candidate: {fallback.name}")
+        return fallback
+
+    fallback = logs[0]
+    print(f"[Log Scanner] No game-specific log found at all; using latest Roblox log: {fallback.name}")
     return fallback
 
 
 def detect_biome_from_log_text(data, min_time=None):
+    """Scan lines of log text and return the last biome detected, or None."""
     detected = None
 
     for line in data.splitlines():
@@ -255,24 +306,26 @@ def detect_biome_from_log_text(data, min_time=None):
             if not line_timestamp or line_timestamp < min_time:
                 continue
 
-        hover_match = re.search(r'"hoverText"\s*:\s*"([^"]+)"', line)
-        asset_match = re.search(r'"assetId"\s*:\s*(\d+)', line)
-        if not hover_match or not asset_match:
-            continue
-
-        hover_text = hover_match.group(1).upper()
-        asset_id = asset_match.group(1)
-        asset_title = BIOME_TITLE_BY_ASSET_ID.get(asset_id)
-        hover_title = BIOME_TITLE_BY_HOVER_TEXT.get(hover_text)
-
-        if asset_title and hover_title and asset_title == hover_title:
-            detected = asset_title
-        elif hover_title:
-            detected = hover_title
-        elif asset_title:
-            detected = asset_title
+        detected_title = detect_biome_from_rpc_line(line)
+        if detected_title:
+            detected = detected_title
 
     return detected
+
+
+def detect_current_biome_from_log(path):
+    """Scan the log backwards and return the most recently logged biome, or None."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+        for line in reversed(lines):
+            detected_title = detect_biome_from_rpc_line(line)
+            if detected_title:
+                return detected_title
+        return None
+    except Exception as e:
+        print(f"[Log Scanner] Error scanning log backwards: {e}")
+        return None
 
 
 def resolve_private_server_from_place(place_id, cookie=None):
@@ -629,59 +682,94 @@ class Scanner(discord.Client):
             )
             self.log_monitor_thread.start()
 
-        print(f"[Discord Scanner] Watching Roblox logs to verify biome: {canonical_biome}")
+        print(
+            f"[Discord Scanner] Waiting {LOG_SCANNER_START_DELAY}s before watching "
+            f"Roblox logs to verify biome: {canonical_biome}"
+        )
         if self.ui_reference:
-            self.ui_reference.update_status(f"Verifying {canonical_biome} in logs...")
+            self.ui_reference.update_status(
+                f"Waiting {LOG_SCANNER_START_DELAY}s before verifying {canonical_biome}..."
+            )
 
     def _monitor_joined_biome_log(self, expected_biome, stop_event):
-        joined_at = time.time()
-        expected_norm = normalize_biome_name(expected_biome)
+        if stop_event.wait(LOG_SCANNER_START_DELAY):
+            return
 
-        log_path = identify_roblox_log(self.roblox_cookie)
+        selected_norms = {normalize_biome_name(b) for b in self.selected_biomes}
+
+        # ── Phase 1: Assign the log for this server join ──────────────────────
+        # A fresh log is located and locked in each time a new server is joined.
+        print("[Log Scanner] Searching for Roblox log file...")
+        log_path = None
+        deadline = time.time() + 120
+        while self.is_running and not stop_event.is_set() and time.time() < deadline:
+            if not self.fish_loop or not self.fish_loop.is_running:
+                self._finish_biome_session(
+                    expected_biome, reason="ended",
+                    detail="Fish loop stopped while locating log",
+                )
+                return
+            log_path = identify_roblox_log(self.roblox_cookie)
+            if log_path:
+                break
+            print("[Log Scanner] No log file found yet — retrying...")
+            time.sleep(2.0)
+
         if not log_path:
+            print("[Log Scanner] Could not find a Roblox log file. Resuming Discord scan.")
             self._finish_biome_session(
-                expected_biome,
-                reason="fake",
-                observed_biome=None,
+                expected_biome, reason="fake",
                 detail="Roblox log could not be found",
             )
             return
 
         self.assigned_log = log_path
-        last_pos = 0
+        print(f"[Log Scanner] Log assigned: {log_path.name}")
 
-        recent_log_cutoff = datetime.fromtimestamp(joined_at - 5, timezone.utc)
-        tail_biome = detect_biome_from_log_text(
-            read_tail_text(log_path),
-            min_time=recent_log_cutoff,
-        )
-        if tail_biome:
-            if normalize_biome_name(tail_biome) == expected_norm:
-                self._confirm_biome_session(expected_biome)
+        # ── Phase 2: Scan the assigned log backwards for the current biome ────
+        # Done once immediately after assignment. If the game is still loading
+        # and no biome entry exists yet, we fall straight through to Phase 3
+        # which will catch the biome the moment it first appears in new lines.
+        print("[Log Scanner] Scanning log backwards for current biome...")
+        current_biome = detect_current_biome_from_log(log_path)
+
+        if current_biome:
+            detected_norm = normalize_biome_name(current_biome)
+            if detected_norm in selected_norms:
+                print(f"[Log Scanner] Current biome confirmed: {current_biome} — starting to fish!")
+                self._confirm_biome_session(current_biome)
             else:
-                print(
-                    f"[Log Scanner] Latest known log biome is {tail_biome}; "
-                    f"waiting for fresh {expected_biome} confirmation."
+                print(f"[Log Scanner] Landed in '{current_biome}' (not a target). Resuming Discord scan.")
+                self._finish_biome_session(
+                    expected_biome, reason="fake", observed_biome=current_biome,
+                    detail="Log shows a different biome than expected",
                 )
+                return
+        else:
+            print("[Log Scanner] No biome entry found yet — game may still be loading. Watching new lines...")
 
-        try:
-            last_pos = os.path.getsize(log_path)
-        except OSError:
-            last_pos = 0
+        # ── Phase 3: Watch new log lines and react to biome changes ──────────
+        last_pos = os.path.getsize(log_path)
+        print("[Log Scanner] Monitoring log for biome changes...")
 
         while self.is_running and not stop_event.is_set():
-            if self.active_biome_session != expected_biome:
+            if not self.fish_loop or not self.fish_loop.is_running:
+                self._finish_biome_session(
+                    self.active_biome_session, reason="ended",
+                    detail="Fish loop stopped during log monitoring",
+                )
                 return
 
             try:
                 current_size = os.path.getsize(log_path)
 
                 if current_size < last_pos:
-                    print("[Log Scanner] Active Roblox log rotated; re-identifying log.")
-                    log_path = identify_roblox_log(self.roblox_cookie)
-                    if not log_path:
+                    print("[Log Scanner] Log file shrank — re-identifying log after rotation...")
+                    candidate = identify_roblox_log(self.roblox_cookie)
+                    if not candidate:
                         time.sleep(0.5)
                         continue
+                    log_path = candidate
                     self.assigned_log = log_path
                     last_pos = 0
                     current_size = os.path.getsize(log_path)
@@ -694,44 +782,34 @@ class Scanner(discord.Client):
 
                     detected_biome = detect_biome_from_log_text(new_data)
                     if detected_biome:
-                        if normalize_biome_name(detected_biome) == expected_norm:
-                            self._confirm_biome_session(expected_biome)
-                        elif self.log_biome_confirmed:
+                        detected_norm = normalize_biome_name(detected_biome)
+                        if detected_norm in selected_norms:
+                            # Still in a target biome (could be a biome-to-biome transition)
+                            if self.active_biome_session != detected_biome:
+                                print(f"[Log Scanner] Biome updated to '{detected_biome}' — still a target, continuing to fish.")
+                                self._confirm_biome_session(detected_biome)
+                        else:
+                            # Biome changed to something we don't want — hop servers
+                            print(f"[Log Scanner] Biome changed to '{detected_biome}' (not a target). Stopping fishing and resuming Discord scan.")
                             self._finish_biome_session(
-                                expected_biome,
+                                self.active_biome_session,
                                 reason="ended",
                                 observed_biome=detected_biome,
                             )
                             return
-                        else:
-                            self._finish_biome_session(
-                                expected_biome,
-                                reason="fake",
-                                observed_biome=detected_biome,
-                                detail="Roblox reported a different active biome",
-                            )
-                            return
-
-                if not self.log_biome_confirmed and time.time() - joined_at > LOG_JOIN_CONFIRM_TIMEOUT:
-                    self._finish_biome_session(
-                        expected_biome,
-                        reason="fake",
-                        observed_biome=None,
-                        detail="Timed out waiting for log confirmation",
-                    )
-                    return
 
                 time.sleep(LOG_POLL_INTERVAL)
 
             except Exception as e:
-                print(f"[Log Scanner] Error while monitoring biome log: {e}")
+                print(f"[Log Scanner] Error while monitoring log: {e}")
                 time.sleep(0.5)
 
     def _confirm_biome_session(self, biome):
-        if self.log_biome_confirmed:
+        if self.log_biome_confirmed and self.active_biome_session == biome:
             return
 
         self.log_biome_confirmed = True
+        self.active_biome_session = biome
         print(f"[Log Scanner] Confirmed active biome from Roblox logs: {biome}")
         if self.ui_reference:
             self.ui_reference.update_status(f"Fishing in {biome}...")
