@@ -15,11 +15,11 @@ FishSniper is a powerful, automated fishing tool designed for Roblox, featuring 
 
 ## App Tabs
 
-- **📋 Dashboard** — live application logs.
-- **⚙️ Settings** — Roblox cookie, Discord user token, Discord webhook URL, and the Discord user ID to ping on priority biome joins.
-- **🌍 Biomes** — toggle which biomes FishSniper should watch for.
-- **🏆 Priority** — drag enabled biomes into tiers to control which ones interrupt which.
-- **💬 Servers** — map Discord servers/channels/categories to scan for biome announcements.
+- **Dashboard** — live application logs.
+- **Settings** — Roblox cookie, Discord user token, Discord webhook URL, and the Discord user ID to ping on priority biome joins.
+- **Biomes** — toggle which biomes FishSniper should watch for.
+- **Priority** — drag enabled biomes into tiers to control which ones interrupt which.
+- **Servers** — map Discord servers/channels/categories to scan for biome announcements.
 
 ## Getting Started
 
@@ -58,6 +58,6 @@ If you want to create a standalone executable for Windows, you can use PyInstall
 
 This tool is for educational and personal use only. Use it at your own risk. Automated tools can violate terms of service; ensure you understand the risks involved before using.
 
-## 📄 License
+## License
 
 This project is licensed under the terms of the license included in the repository.
