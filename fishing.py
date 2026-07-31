@@ -88,7 +88,7 @@ COORDS = {
 
 PATHING_TIMINGS = {
     "VIP": {
-        "ALIGNMENT1": 3.9,
+        "ALIGNMENT1": 4.15,
         "ALIGNMENT1.5":0.8,
         "ALIGNMENT2": 0.6,
         "ALIGNMENT3": 0.4,
@@ -97,8 +97,9 @@ PATHING_TIMINGS = {
         "MERCHANT3": 1.3,
         "MERCHANT4": 0.2,
         "MERCHANT5": 0.4,
-        "MERCHANT6": 1.35,
-        "SPOT1": 6.5,
+        "MERCHANT6": 1.45,
+        "SPOT1": 0.1,
+        "SPOT2": 2.0,
     },
     "NORMAL": {
         "ALIGNMENT1": 5.0,
@@ -112,6 +113,7 @@ PATHING_TIMINGS = {
         "MERCHANT5": 0.5,
         "MERCHANT6": 1.56,
         "SPOT1": 8.1,
+        "SPOT2": 3.0,
     }
 }
 
@@ -204,6 +206,7 @@ class FishSolBot:
             self.MERCHANT5 = timing["MERCHANT5"]
             self.MERCHANT6 = timing["MERCHANT6"]
             self.SPOT1 = timing["SPOT1"]
+            self.SPOT2 = timing["SPOT2"]
             print(f"[System] Pathing timings updated to {speed} (mapped to {normalized_speed})")
 
         if resolution in COORDS:
@@ -381,9 +384,13 @@ class FishSolBot:
         pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
         time.sleep(0.2)
         
-        pydirectinput.keyDown('a')
+        pydirectinput.keyDown('d')
         time.sleep(self.SPOT1)
-        pydirectinput.keyUp('a')
+        pydirectinput.keyUp('d')
+        time.sleep(0.1)
+        pydirectinput.keyDown('w')
+        time.sleep(self.SPOT2)
+        pydirectinput.keyUp('w')
 
     def do_pathing_routine(self, do_sell=True):
         print(f"=== PATHING ROUTINE STARTED (Selling: {do_sell}) ===")

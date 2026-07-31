@@ -10,12 +10,13 @@ from pathlib import Path
 
 URL_REGEX = r"https?://[^\s)]+"
 MD_LINK_REGEX = r"\[.*?\]\((https?://[^\s)]+)\)"
+ROBLOX_PROTOCOL_REGEX = r"roblox://[^\s)]+"
 
 # If you ever support multiple games, make this configurable.
 DEFAULT_PLACE_ID = "15532962292"  # FishSol placeId (update if needed)
 
 LOG_JOIN_CONFIRM_TIMEOUT = 150
-LOG_SCANNER_START_DELAY = 10
+LOG_SCANNER_START_DELAY = 20
 LOG_POLL_INTERVAL = 0.1
 
 BIOME_LOG_DATA = [
@@ -56,13 +57,22 @@ def extract_text(message):
 
 
 def extract_urls(message):
-    urls = []
+    # Direct roblox:// protocol strings (e.g. a "Protocol (Paste into Browser)"
+    # line) are the ground truth for what server to join — they encode the
+    # place/instance IDs directly. Generic https:// links (a "Join Server"
+    # hyperlink, a wrapper/redirect page, a share link, etc.) are much less
+    # reliable, since some of them go through third-party redirectors that
+    # don't map cleanly onto Roblox's own join parameters. So protocol
+    # strings are always returned first, ahead of any web links.
+    protocol_urls = []
+    web_urls = []
 
     def scan_str(s):
         if not s:
             return
-        urls.extend(re.findall(URL_REGEX, s))
-        urls.extend(re.findall(MD_LINK_REGEX, s))
+        protocol_urls.extend(re.findall(ROBLOX_PROTOCOL_REGEX, s))
+        web_urls.extend(re.findall(URL_REGEX, s))
+        web_urls.extend(re.findall(MD_LINK_REGEX, s))
 
     scan_str(message.content)
     for embed in message.embeds:
@@ -72,13 +82,13 @@ def extract_urls(message):
             scan_str(field.name)
             scan_str(field.value)
         if embed.url:
-            urls.append(embed.url)
+            web_urls.append(embed.url)
     if hasattr(message, "components") and message.components:
         for row in message.components:
             for component in row.children:
                 if hasattr(component, "url") and component.url:
-                    urls.append(component.url)
-    return list(dict.fromkeys(urls))
+                    web_urls.append(component.url)
+    return list(dict.fromkeys(protocol_urls + web_urls))
 
 
 def normalize_biome_name(name):
@@ -108,6 +118,34 @@ for biome in BIOME_LOG_DATA:
 def canonical_biome_title(name):
     normalized = normalize_biome_name(name)
     return BIOME_TITLE_BY_NORMALIZED.get(normalized, name)
+
+
+def biome_thumbnail_url(biome_name):
+    """
+    Thumbnail images live at a fixed GitHub raw-content pattern, keyed by a
+    lowercase, underscore-separated slug of the biome's canonical title
+    (e.g. "Sand Storm" -> "sand_storm", NOT "sandstorm" — spaces become
+    underscores rather than being stripped, unlike normalize_biome_name).
+    """
+    slug = (biome_name or "").strip().lower().replace(" ", "_")
+    return f"https://raw.githubusercontent.com/akindem2/thumbnails/refs/heads/main/old_{slug}.png"
+
+
+# Biomes that get an @-ping in their join webhook notification, regardless of
+# what priority tier they're configured with in the UI.
+PING_BIOME_NORMS = {normalize_biome_name(b) for b in ("Glitched", "Dreamspace", "Cyberspace")}
+
+
+def biome_should_ping(biome_name):
+    return normalize_biome_name(biome_name) in PING_BIOME_NORMS
+
+
+# NOTE: Priority levels are no longer hardcoded here — they're configured in
+# the UI's Priority tab (a tier board) and pushed in via Scanner.load_settings
+# as `biome_priority_levels`: {normalized_biome_name: tier_int}. Tier 1 is the
+# highest priority; larger numbers are lower priority. A biome with no entry
+# is treated as the lowest possible priority (can be interrupted by anything
+# with a real tier, but can never itself interrupt).
 
 
 def resolve_biome_title_from_rpc(hover_text, asset_id):
@@ -372,14 +410,16 @@ def resolve_private_server_from_place(place_id, cookie=None):
 
 def _parse_roblox_link(raw_url: str):
     """
-    Returns (place_id, link_code, share_code)
+    Returns (place_id, link_code, share_code, game_instance_id)
     - place_id: string or None
     - link_code: privateServerLinkCode or joinCode or None
     - share_code: share-links code (hex) or None
+    - game_instance_id: specific running server GUID (gameInstanceId) or None
     """
     place_id = None
     link_code = None
     share_code = None
+    game_instance_id = None
 
     # 1. Direct private server link:
     #    https://www.roblox.com/games/PLACEID/... ?privateServerLinkCode=XXXX
@@ -391,16 +431,29 @@ def _parse_roblox_link(raw_url: str):
     if m:
         place_id = m.group(1)
         link_code = m.group(2)
-        return place_id, link_code, None
+        return place_id, link_code, None, None
 
     # 2. New share-links wrapper:
     #    https://www.roblox.com/share-links?code=abcdef1234...
     m = re.search(r"[?&]code=([a-f0-9]+)", raw_url, re.IGNORECASE)
     if m:
         share_code = m.group(1)
-        return None, None, share_code
+        return None, None, share_code, None
 
-    # 3. Some bots send just the roblox:// deep link
+    # 3. Direct game-instance join (a specific already-running server):
+    #    roblox://placeID=X&gameInstanceId=XXXX-XXXX-...
+    #    or a games/PLACEID/... link carrying ?gameInstanceId=XXXX
+    m = re.search(r"gameInstanceId=([\w-]+)", raw_url, re.IGNORECASE)
+    if m:
+        game_instance_id = m.group(1)
+        place_match = re.search(r"place[iI][dD]=(\d+)", raw_url) or re.search(
+            r"games/(\d+)", raw_url, re.IGNORECASE
+        )
+        if place_match:
+            place_id = place_match.group(1)
+        return place_id, None, None, game_instance_id
+
+    # 4. Some bots send just the roblox:// deep link
     #    roblox://placeID=...&linkCode=...
     m = re.search(r"placeID=(\d+)", raw_url, re.IGNORECASE)
     if m:
@@ -409,7 +462,7 @@ def _parse_roblox_link(raw_url: str):
     if m2:
         link_code = m2.group(1)
 
-    return place_id, link_code, None
+    return place_id, link_code, None, None
 
 
 def _resolve_share_code(share_code: str):
@@ -466,6 +519,89 @@ def _launch_deeplink(place_id: str, link_code: str):
     return True
 
 
+def _launch_instance_deeplink(place_id: str, game_instance_id: str):
+    """
+    Deep link launcher for joining a specific already-running server
+    instance (not a private server). Works if Roblox is installed and
+    registered as a URL handler.
+    """
+    url = f"roblox://placeID={place_id}&gameInstanceId={game_instance_id}"
+    print(f"[Roblox Launcher] Launching instance via deep link: {url}")
+    os.startfile(url)
+    return True
+
+
+def _launch_instance(place_id: str, game_instance_id: str, cookie: str):
+    """
+    Joins a specific running server instance. Uses PlaceLauncher's
+    RequestGameJob mode (the instance-join equivalent of RequestGame)
+    when a cookie is available; falls back to the roblox:// deep link
+    otherwise or on any failure along the way.
+    """
+    if not cookie or cookie.strip() == "":
+        return _launch_instance_deeplink(place_id, game_instance_id)
+
+    try:
+        session = requests.Session()
+        session.cookies[".ROBLOSECURITY"] = cookie.strip()
+
+        # First call to get X-CSRF
+        csrf_res = session.post("https://auth.roblox.com/v1/authentication-ticket")
+        csrf_token = csrf_res.headers.get("x-csrf-token")
+
+        if not csrf_token:
+            # Try legacy xsrf endpoint as backup
+            xsrf_res = session.post("https://api.roblox.com/v1/xsrf-token")
+            csrf_token = xsrf_res.headers.get("x-csrf-token")
+
+        if not csrf_token:
+            print("[Roblox Launcher] Failed to obtain X-CSRF token. Falling back to deep link.")
+            return _launch_instance_deeplink(place_id, game_instance_id)
+
+        headers = {
+            "X-CSRF-TOKEN": csrf_token,
+            "Referer": "https://www.roblox.com",
+        }
+
+        ticket_res = session.post(
+            "https://auth.roblox.com/v1/authentication-ticket",
+            headers=headers,
+        )
+        ticket = ticket_res.headers.get("rbx-authentication-ticket")
+
+        if not ticket:
+            print("[Roblox Launcher] Cookie invalid or ticket missing. Falling back to deep link.")
+            return _launch_instance_deeplink(place_id, game_instance_id)
+
+        launcher_url = (
+            "https://assetgame.roblox.com/game/PlaceLauncher.ashx"
+            f"?request=RequestGameJob&placeId={place_id}"
+            f"&gameInstanceId={game_instance_id}&isPlayTogetherGame=false"
+        )
+        encoded_launcher_url = urllib.parse.quote(launcher_url)
+
+        launch_time = int(time.time() * 1000)
+        launch_str = (
+            "roblox:1"
+            f"+launchmode:play"
+            f"+gameinfo:{ticket}"
+            f"+launchtime:{launch_time}"
+            f"+placelauncherurl:{encoded_launcher_url}"
+            "+robloxLocale:en_us"
+            "+gameLocale:en_us"
+            "+channel:"
+        )
+
+        print("[Roblox Launcher] Launching instance using Cookie Auth + PlaceLauncher (RequestGameJob)...")
+        os.startfile(launch_str)
+        return True
+
+    except Exception as e:
+        print(f"[Roblox Launcher] Fatal error during instance launch: {e}")
+        print("[Roblox Launcher] Falling back to deep link.")
+        return _launch_instance_deeplink(place_id, game_instance_id)
+
+
 def resolve_and_launch_with_cookie(raw_url, cookie):
     """
     Robust resolver:
@@ -476,7 +612,12 @@ def resolve_and_launch_with_cookie(raw_url, cookie):
     """
     print(f"[Roblox Launcher] Processing link: {raw_url}")
 
-    place_id, link_code, share_code = _parse_roblox_link(raw_url)
+    place_id, link_code, share_code, game_instance_id = _parse_roblox_link(raw_url)
+
+    # Direct game-instance join — highest priority, nothing to resolve via API
+    if game_instance_id and place_id:
+        print(f"[Roblox Launcher] Detected Game Instance: {game_instance_id} (place {place_id})")
+        return _launch_instance(place_id, game_instance_id, cookie)
 
     # If we only have a share code, resolve it via Roblox API
     if share_code and (not place_id or not link_code):
@@ -561,7 +702,7 @@ def resolve_and_launch_with_cookie(raw_url, cookie):
 
         launch_time = int(time.time() * 1000)
         launch_str = (
-            "roblox-player:1"
+            "roblox:1"
             f"+launchmode:play"
             f"+gameinfo:{ticket}"
             f"+launchtime:{launch_time}"
@@ -595,22 +736,34 @@ class Scanner(discord.Client):
         self.roblox_cookie = None
         self.ui_reference = None  # Reference to UI for status updates
         self.webhook_url = None
+        self.biome_priority_levels = {}  # {normalized_biome_name: tier_int}, tier 1 = highest priority
+        self.discord_ping_user_id = None  # Discord user ID to @-ping on priority biome joins
+        self.pending_join_url = None  # link/protocol used for the join currently being verified
+        self.pending_join_is_priority_interrupt = False
+        self.session_join_url = None  # same, but pinned to the confirmed active_biome_session
+        self.session_is_priority_interrupt = False
         self.log_monitor_thread = None
         self.log_monitor_stop = threading.Event()
         self.log_monitor_lock = threading.Lock()
         self.log_biome_confirmed = False
         self.assigned_log = None
 
+    def biome_priority_level(self, biome_name):
+        """
+        Returns the configured priority tier for a biome (1 = highest).
+        Biomes with no configured tier are treated as the lowest possible
+        priority — they can be interrupted by anything with a real tier, but
+        can never interrupt anything themselves.
+        """
+        if not biome_name:
+            return float("inf")
+        return self.biome_priority_levels.get(normalize_biome_name(biome_name), float("inf"))
+
     async def on_ready(self):
         print(f"Logged in as {self.user}")
 
     async def on_message(self, message):
         if not self.is_running:
-            return
-
-        # The Discord scanner stays quiet while the Roblox log monitor verifies
-        # and tracks the biome we already joined.
-        if self.active_biome_session:
             return
 
         if message.webhook_id is None and not message.author.bot:
@@ -641,6 +794,32 @@ class Scanner(discord.Client):
         ):
             for biome in self.selected_biomes:
                 if re.search(r"\b" + re.escape(biome.lower()) + r"\b", clean_text):
+                    canonical_new_biome = canonical_biome_title(biome)
+
+                    is_priority_interrupt = False
+
+                    if self.active_biome_session:
+                        # Already mid-session. Normally the Discord scanner stays
+                        # quiet while the Roblox log monitor verifies and tracks
+                        # the biome we already joined — the one exception is a
+                        # strictly higher-priority biome showing up (a lower tier
+                        # number, per biome_priority_level), which jumps the
+                        # queue immediately.
+                        current_level = self.biome_priority_level(self.active_biome_session)
+                        new_level = self.biome_priority_level(canonical_new_biome)
+
+                        if new_level >= current_level:
+                            return
+
+                        is_priority_interrupt = True
+
+                        print(
+                            f"[Discord Scanner] Higher-priority biome '{canonical_new_biome}' "
+                            f"(tier {new_level}) detected while fishing '{self.active_biome_session}' "
+                            f"(tier {current_level}). Interrupting current session..."
+                        )
+                        self._interrupt_for_priority_biome(self.active_biome_session, canonical_new_biome)
+
                     print(f"[Discord Scanner] Target Biome STARTED: {biome}")
 
                     urls = extract_urls(message)
@@ -660,11 +839,36 @@ class Scanner(discord.Client):
                             self.fish_loop.toggle_on()
                         
                         if success:
+                            self.pending_join_url = raw_url
+                            self.pending_join_is_priority_interrupt = is_priority_interrupt
                             self._start_log_monitor(biome)
                         
                         return
                     else:
                         print(f"[Discord Scanner] Biome '{biome}' started, but no links were found in the message.")
+
+    def _interrupt_for_priority_biome(self, old_biome, new_biome):
+        """
+        Immediately abandons the current lower-priority biome session —
+        stopping the log monitor and the fishing loop mid-action — so we're
+        clear to join the just-detected higher-priority biome.
+        """
+        with self.log_monitor_lock:
+            self.log_monitor_stop.set()
+            self.active_biome_session = None
+            self.log_biome_confirmed = False
+
+        if self.fish_loop:
+            self.fish_loop.toggle_off()
+
+        print(f"[Discord Scanner] Abandoned '{old_biome}' to chase priority biome '{new_biome}'.")
+
+        if self.ui_reference:
+            self.ui_reference.update_status(f"Interrupting {old_biome} for priority biome {new_biome}...")
+
+        if self.webhook_url:
+            from webhook import Webhook
+            Webhook(self.webhook_url).send_priority_interrupt(old_biome, new_biome)
 
     def _start_log_monitor(self, biome):
         canonical_biome = canonical_biome_title(biome)
@@ -674,6 +878,8 @@ class Scanner(discord.Client):
             self.log_monitor_stop = threading.Event()
             self.active_biome_session = canonical_biome
             self.log_biome_confirmed = False
+            self.session_join_url = self.pending_join_url
+            self.session_is_priority_interrupt = self.pending_join_is_priority_interrupt
 
             self.log_monitor_thread = threading.Thread(
                 target=self._monitor_joined_biome_log,
@@ -815,7 +1021,12 @@ class Scanner(discord.Client):
             self.ui_reference.update_status(f"Fishing in {biome}...")
         if self.webhook_url:
             from webhook import Webhook
-            Webhook(self.webhook_url).send_biome_joined(biome)
+            Webhook(self.webhook_url).send_biome_joined(
+                biome,
+                join_url=self.session_join_url,
+                is_priority_interrupt=self.session_is_priority_interrupt,
+                ping_user_id=self.discord_ping_user_id,
+            )
 
     def _finish_biome_session(self, biome, reason, observed_biome=None, detail=None):
         with self.log_monitor_lock:
@@ -843,13 +1054,19 @@ class Scanner(discord.Client):
         if self.ui_reference:
             self.ui_reference.update_status("Scanning for biomes...")
 
-    def load_settings(self, token, biomes, cookie, mappings, webhook_url, ui_ref=None):
+    def load_settings(self, token, biomes, cookie, mappings, webhook_url, ui_ref=None, biome_priority_levels=None,
+                       discord_ping_user_id=None):
         self.token = token
         self.selected_biomes = [canonical_biome_title(biome) for biome in biomes]
         self.roblox_cookie = cookie
         self.guild_mappings = mappings
         self.webhook_url = webhook_url
         self.ui_reference = ui_ref
+        self.discord_ping_user_id = discord_ping_user_id.strip() if discord_ping_user_id else None
+        if biome_priority_levels is not None:
+            self.biome_priority_levels = {
+                normalize_biome_name(biome): level for biome, level in biome_priority_levels.items()
+            }
 
     def toggle_on(self):
         print("[Discord Scanner] Started")

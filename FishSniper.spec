@@ -1,34 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
-import customtkinter
-import os
+#
+# Builds the FishSniper GUI app (entry point: main.py) into a windowed,
+# console-less executable.
+#
+# - CustomTkinter ships its own PyInstaller hook, which bundles its
+#   theme/asset files automatically — no manual `datas` entries needed.
+# - `PIL._tkinter_finder` is listed explicitly in hiddenimports: it's a
+#   dynamic import that PyInstaller can miss, and is needed here because
+#   the UI's biome thumbnails go through CustomTkinter's CTkImage, which
+#   relies on Pillow's ImageTk integration.
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[(customtkinter.__path__[0], 'customtkinter/')],
-    hiddenimports=[
-        'aiohttp',
-        'customtkinter',
-        'discord.py-self',
-        'pyautogui',
-        'requests',
-        'rich',
-        'PIL',
-        'win32api',
-        'win32con',
-        'win32gui',
-        'keyboard',
-        'curl_cffi',
-        'google.protobuf',
-        'packaging',
-        'tzlocal',
-        'tzdata',
-        'audioop',
-        'cffi',
-        'markdown_it',
-        'propcache'
-    ],
+    datas=[],
+    hiddenimports=['PIL._tkinter_finder'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

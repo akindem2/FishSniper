@@ -3,3 +3,5 @@ __pycache__/
 vscode/
 build/
 dist/
+main.spec
+_write_test.txt
