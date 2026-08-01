@@ -60,10 +60,9 @@ class Webhook:
 
     def send_biome_ended(self, biome):
         self._send({
-            "title": f"⏳ Biome Ended: {biome}",
+            "title": f"Biome Ended: {biome}",
             "description": "Resuming background scan.",
             "color": discord.Color.orange().value,
-            "thumbnail": {"url": biome_thumbnail_url(biome)},
         })
 
     def send_priority_interrupt(self, old_biome, new_biome):

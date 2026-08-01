@@ -12,6 +12,29 @@ URL_REGEX = r"https?://[^\s)]+"
 MD_LINK_REGEX = r"\[.*?\]\((https?://[^\s)]+)\)"
 ROBLOX_PROTOCOL_REGEX = r"roblox://[^\s)]+"
 
+
+def _roblox_error_detail(response):
+    """Return a short, safe-to-log explanation from a Roblox HTTP response."""
+    status = f"HTTP {response.status_code} {response.reason}".strip()
+    try:
+        payload = response.json()
+        errors = payload.get("errors", []) if isinstance(payload, dict) else []
+        if errors:
+            messages = [
+                f"{error.get('code', 'unknown')}: {error.get('message', 'no message')}"
+                for error in errors
+                if isinstance(error, dict)
+            ]
+            if messages:
+                return f"{status} — {'; '.join(messages)}"
+    except ValueError:
+        pass
+
+    # Roblox occasionally returns a plain-text error. Limit it so logs stay
+    # useful and never include request headers (which contain credentials).
+    body = " ".join(response.text.split())[:300]
+    return f"{status}{f' — {body}' if body else ''}"
+
 # If you ever support multiple games, make this configurable.
 DEFAULT_PLACE_ID = "15532962292"  # FishSol placeId (update if needed)
 
@@ -553,24 +576,33 @@ def _launch_instance(place_id: str, game_instance_id: str, cookie: str):
             # Try legacy xsrf endpoint as backup
             xsrf_res = session.post("https://api.roblox.com/v1/xsrf-token")
             csrf_token = xsrf_res.headers.get("x-csrf-token")
+            csrf_res = xsrf_res
 
         if not csrf_token:
-            print("[Roblox Launcher] Failed to obtain X-CSRF token. Falling back to deep link.")
+            print(
+                "[Roblox Launcher] Failed to obtain X-CSRF token: "
+                f"{_roblox_error_detail(csrf_res)}. Falling back to deep link."
+            )
             return _launch_instance_deeplink(place_id, game_instance_id)
 
         headers = {
             "X-CSRF-TOKEN": csrf_token,
             "Referer": "https://www.roblox.com",
+            "Content-Type": "application/json",
         }
 
         ticket_res = session.post(
             "https://auth.roblox.com/v1/authentication-ticket",
             headers=headers,
+            json={},
         )
         ticket = ticket_res.headers.get("rbx-authentication-ticket")
 
         if not ticket:
-            print("[Roblox Launcher] Cookie invalid or ticket missing. Falling back to deep link.")
+            print(
+                "[Roblox Launcher] Roblox did not issue an authentication ticket: "
+                f"{_roblox_error_detail(ticket_res)}. Falling back to deep link."
+            )
             return _launch_instance_deeplink(place_id, game_instance_id)
 
         launcher_url = (
@@ -614,10 +646,12 @@ def resolve_and_launch_with_cookie(raw_url, cookie):
 
     place_id, link_code, share_code, game_instance_id = _parse_roblox_link(raw_url)
 
-    # Direct game-instance join — highest priority, nothing to resolve via API
+    # Direct game-instance join — highest priority. Let Roblox handle its own
+    # native deep link; the custom PlaceLauncher ticket flow can discard the
+    # requested instance and put the player in a different server.
     if game_instance_id and place_id:
         print(f"[Roblox Launcher] Detected Game Instance: {game_instance_id} (place {place_id})")
-        return _launch_instance(place_id, game_instance_id, cookie)
+        return _launch_instance_deeplink(place_id, game_instance_id)
 
     # If we only have a share code, resolve it via Roblox API
     if share_code and (not place_id or not link_code):
@@ -672,25 +706,34 @@ def resolve_and_launch_with_cookie(raw_url, cookie):
             # Try legacy xsrf endpoint as backup
             xsrf_res = session.post("https://api.roblox.com/v1/xsrf-token")
             csrf_token = xsrf_res.headers.get("x-csrf-token")
+            csrf_res = xsrf_res
 
         if not csrf_token:
-            print("[Roblox Launcher] Failed to obtain X-CSRF token. Falling back to deep link.")
+            print(
+                "[Roblox Launcher] Failed to obtain X-CSRF token: "
+                f"{_roblox_error_detail(csrf_res)}. Falling back to deep link."
+            )
             return _launch_deeplink(place_id, link_code)
 
         headers = {
             "X-CSRF-TOKEN": csrf_token,
             "Referer": "https://www.roblox.com",
+            "Content-Type": "application/json",
         }
 
         ticket_res = session.post(
             "https://auth.roblox.com/v1/authentication-ticket",
             headers=headers,
+            json={},
         )
         ticket = ticket_res.headers.get("rbx-authentication-ticket")
 
 
         if not ticket:
-            print("[Roblox Launcher] Cookie invalid or ticket missing. Falling back to deep link.")
+            print(
+                "[Roblox Launcher] Roblox did not issue an authentication ticket: "
+                f"{_roblox_error_detail(ticket_res)}. Falling back to deep link."
+            )
             return _launch_deeplink(place_id, link_code)
 
         launcher_url = (
@@ -834,6 +877,7 @@ class Scanner(discord.Client):
                         success = resolve_and_launch_with_cookie(raw_url, self.roblox_cookie)
                         
                         if success and self.fish_loop:
+                            self.fish_loop.begin_server_session()
                             self.fish_loop.is_waiting_for_start_button = True
                             self.fish_loop.has_done_initial_pathing = False
                             self.fish_loop.toggle_on()

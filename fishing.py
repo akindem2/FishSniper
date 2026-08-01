@@ -112,8 +112,109 @@ PATHING_TIMINGS = {
         "MERCHANT4": 0.24,
         "MERCHANT5": 0.5,
         "MERCHANT6": 1.56,
-        "SPOT1": 8.1,
-        "SPOT2": 3.0,
+        "SPOT1": 0.12,
+        "SPOT2": 2.4,
+    }
+}
+
+# Paths run only after the shared route reaches the merchant. Path 1 mirrors
+# the old merchant-to-spot route. Replace Paths 2-5 with custom action lists.
+# Supported actions: ("wait", seconds), ("hold", key, seconds), ("press", key),
+# ("click", coordinate_attribute), ("click_at", x, y), and ("scroll", amount).
+def _default_post_merchant_path(timing):
+    return [
+        ("click", "CLOSE_MERCHANT"),
+        ("hold", "d", timing["SPOT1"]),
+        ("wait", 0.1),
+        ("hold", "w", timing["SPOT2"]),
+    ]
+
+
+POST_MERCHANT_PATHS = {
+    "VIP": {
+        "Path 1": _default_post_merchant_path(PATHING_TIMINGS["VIP"]),
+        "Path 2": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", 0.1),
+            ("hold", "w", 1.2),
+            ("hold", "a", 0.7),
+            ("hold", "w", 0.6),
+        ],
+        "Path 3": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", 0.1),
+            ("hold", "w", 1.2),
+            ("hold", "a", 0.7),
+            ("hold", "w", 0.6),
+            ("hold", "a", 0.3),
+            ("hold", "w", 0.3),
+        ],
+        "Path 4": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", 0.1),
+            ("hold", "w", 1.2),
+            ("hold", "a", 0.7),
+            ("hold", "w", 0.6),
+            ("hold", "a", 0.3),
+            ("hold", "w", 0.3),
+            ("hold", "a", 0.7),
+            ("hold", "w", 0.4),
+        ],
+        "Path 5": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", 0.1),
+            ("hold", "w", 1.2),
+            ("hold", "a", 0.7),
+            ("hold", "w", 0.6),
+            ("hold", "a", 0.3),
+            ("hold", "w", 0.3),
+            ("hold", "a", 0.7),
+            ("hold", "w", 0.4),
+            ("hold", "a", 0.8),
+        ],
+    },
+
+    "NORMAL": {
+        "Path 1": _default_post_merchant_path(PATHING_TIMINGS["NORMAL"]),
+        "Path 2": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", 0.12),
+            ("hold", "w", 1.44),
+            ("hold", "a", 0.84),
+            ("hold", "w", 0.72),
+        ],
+        "Path 3": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", 0.12),
+            ("hold", "w", 1.44),
+            ("hold", "a", 0.84),
+            ("hold", "w", 0.72),
+            ("hold", "a", 0.36),
+            ("hold", "w", 0.36),
+        ],
+        "Path 4": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", 0.12),
+            ("hold", "w", 1.44),
+            ("hold", "a", 0.84),
+            ("hold", "w", 0.72),
+            ("hold", "a", 0.36),
+            ("hold", "w", 0.36),
+            ("hold", "a", 0.84),
+            ("hold", "w", 0.48),
+        ],
+        "Path 5": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", 0.12),
+            ("hold", "w", 1.44),
+            ("hold", "a", 0.84),
+            ("hold", "w", 0.72),
+            ("hold", "a", 0.36),
+            ("hold", "w", 0.36),
+            ("hold", "a", 0.84),
+            ("hold", "w", 0.48),
+            ("hold", "a", 0.96),
+        ],
     }
 }
 
@@ -139,6 +240,11 @@ class FishSolBot:
         self.max_catches = 1
         self.sell_loops = 22
         self.cast_fail_count = 0
+        self.path_profiles = []
+        self.active_path_index = 0
+        self.preferred_path_index = 0
+        self.consecutive_failsafes = 0
+        self.path_change_callback = None
         
         # Initialize default variables (Replaces all the global variables)
         self.update_coordinates("1080p", "Normal")
@@ -193,21 +299,22 @@ class FishSolBot:
         elif normalized_speed in ("NON VIP", "NON VIP PATHING", "NORMAL"):
             normalized_speed = "NORMAL"
 
-        if normalized_speed in PATHING_TIMINGS:
-            timing = PATHING_TIMINGS[normalized_speed]
-            self.ALIGNMENT1 = timing["ALIGNMENT1"]
-            self.ALIGNMENT15 = timing["ALIGNMENT1.5"]
-            self.ALIGNMENT2 = timing["ALIGNMENT2"]
-            self.ALIGNMENT3 = timing["ALIGNMENT3"]
-            self.MERCHANT1 = timing["MERCHANT1"]
-            self.MERCHANT2 = timing["MERCHANT2"]
-            self.MERCHANT3 = timing["MERCHANT3"]
-            self.MERCHANT4 = timing["MERCHANT4"]
-            self.MERCHANT5 = timing["MERCHANT5"]
-            self.MERCHANT6 = timing["MERCHANT6"]
-            self.SPOT1 = timing["SPOT1"]
-            self.SPOT2 = timing["SPOT2"]
-            print(f"[System] Pathing timings updated to {speed} (mapped to {normalized_speed})")
+        if normalized_speed not in PATHING_TIMINGS:
+            normalized_speed = "NORMAL"
+
+        timing = PATHING_TIMINGS[normalized_speed]
+        self.ALIGNMENT1 = timing["ALIGNMENT1"]
+        self.ALIGNMENT15 = timing["ALIGNMENT1.5"]
+        self.ALIGNMENT2 = timing["ALIGNMENT2"]
+        self.ALIGNMENT3 = timing["ALIGNMENT3"]
+        self.MERCHANT1 = timing["MERCHANT1"]
+        self.MERCHANT2 = timing["MERCHANT2"]
+        self.MERCHANT3 = timing["MERCHANT3"]
+        self.MERCHANT4 = timing["MERCHANT4"]
+        self.MERCHANT5 = timing["MERCHANT5"]
+        self.MERCHANT6 = timing["MERCHANT6"]
+        print(f"[System] Shared path timings updated to {speed} (mapped to {normalized_speed})")
+        self._set_path_profiles(POST_MERCHANT_PATHS[normalized_speed])
 
         if resolution in COORDS:
             self.CAST_ROD_POS = COORDS[resolution]["FISHING"]["CAST_ROD"]
@@ -228,6 +335,60 @@ class FishSolBot:
 
             self.START_BUTTON_POS = COORDS[resolution]["START"]["START_BUTTON_POS"]
             print(f"[System] Coordinates updated to {resolution}")
+
+    def _set_path_profiles(self, profiles):
+        """Load the selected mode's post-merchant action lists."""
+        validated = [
+            {"name": name, "actions": list(actions)}
+            for name, actions in profiles.items()
+            if isinstance(name, str) and isinstance(actions, list)
+        ]
+        if not validated:
+            validated = [{"name": "Path 1", "actions": []}]
+
+        self.path_profiles = validated
+        self.active_path_index = min(self.active_path_index, len(validated) - 1)
+        self._apply_active_path()
+
+    def _apply_active_path(self):
+        profile = self.path_profiles[self.active_path_index]
+        print(f"[Pathing] Active path: {profile['name']} ({self.active_path_index + 1}/{len(self.path_profiles)})")
+        if self.path_change_callback:
+            self.path_change_callback(profile["name"])
+
+    def set_path_change_callback(self, callback):
+        self.path_change_callback = callback
+
+    def select_path(self, path_index):
+        """Set the manually selected starting path (zero-based index)."""
+        if not self.path_profiles:
+            return
+        self.preferred_path_index = max(0, min(int(path_index), len(self.path_profiles) - 1))
+        self.active_path_index = self.preferred_path_index
+        self.consecutive_failsafes = 0
+        self._apply_active_path()
+
+    def begin_server_session(self):
+        """Reset path failover state when the scanner joins a new server."""
+        self.active_path_index = min(self.preferred_path_index, len(self.path_profiles) - 1)
+        self.consecutive_failsafes = 0
+        self._apply_active_path()
+
+    def record_fishing_failsafe(self):
+        self.consecutive_failsafes += 1
+        print(f"[Fishing Bot] Failsafe {self.consecutive_failsafes}/2 on the current server.")
+        if self.consecutive_failsafes < 2 or len(self.path_profiles) < 2:
+            return
+
+        self.active_path_index = (self.active_path_index + 1) % len(self.path_profiles)
+        self.consecutive_failsafes = 0
+        self._apply_active_path()
+        print("[Fishing Bot] Two consecutive failsafes: switched to the next path profile.")
+
+    def record_successful_catch(self):
+        if self.consecutive_failsafes:
+            print("[Fishing Bot] Catch succeeded; clearing path failsafe count.")
+        self.consecutive_failsafes = 0
 
     def reset_character(self):
         print("[Pathing] Resetting character...")
@@ -376,21 +537,38 @@ class FishSolBot:
             time.sleep(1.0)
 
     def walk_back_to_spot(self):
-        print("[Pathing] Walking from merchant to fishing spot...")
-        pydirectinput.moveTo(self.CLOSE_MERCHANT[0], self.CLOSE_MERCHANT[1]-3)
-        time.sleep(0.2)
-        pydirectinput.moveTo(self.CLOSE_MERCHANT[0], self.CLOSE_MERCHANT[1], duration=0.2)
-        time.sleep(0.1)
-        pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
-        time.sleep(0.2)
-        
-        pydirectinput.keyDown('d')
-        time.sleep(self.SPOT1)
-        pydirectinput.keyUp('d')
-        time.sleep(0.1)
-        pydirectinput.keyDown('w')
-        time.sleep(self.SPOT2)
-        pydirectinput.keyUp('w')
+        profile = self.path_profiles[self.active_path_index]
+        print(f"[Pathing] Following {profile['name']} from merchant to fishing spot...")
+        for action in profile["actions"]:
+            if not self.is_running:
+                return
+            try:
+                kind = action[0]
+                if kind == "wait":
+                    time.sleep(float(action[1]))
+                elif kind == "hold":
+                    key, duration = action[1], float(action[2])
+                    pydirectinput.keyDown(key)
+                    try:
+                        time.sleep(duration)
+                    finally:
+                        pydirectinput.keyUp(key)
+                elif kind == "press":
+                    pydirectinput.press(action[1])
+                elif kind == "click":
+                    x, y = getattr(self, action[1])
+                    pydirectinput.moveTo(x, y - 3)
+                    time.sleep(0.1)
+                    pydirectinput.moveTo(x, y, duration=0.2)
+                    pydirectinput.click()
+                elif kind == "click_at":
+                    pydirectinput.click(action[1], action[2])
+                elif kind == "scroll":
+                    pyautogui.scroll(int(action[1]))
+                else:
+                    print(f"[Pathing] Skipping unknown action: {action}")
+            except (IndexError, TypeError, ValueError, AttributeError) as e:
+                print(f"[Pathing] Skipping invalid action {action}: {e}")
 
     def do_pathing_routine(self, do_sell=True):
         print(f"=== PATHING ROUTINE STARTED (Selling: {do_sell}) ===")
@@ -524,6 +702,7 @@ class FishSolBot:
             pydirectinput.mouseUp()
             time.sleep(0.5)
             print("Fishing timeout or no bite detected. Retrying recovery pathing...")
+            self.record_fishing_failsafe()
             self.do_pathing_routine(do_sell=False)
             return
 
@@ -575,6 +754,7 @@ class FishSolBot:
         time.sleep(0.5)
         
         self.catch_count += 1
+        self.record_successful_catch()
         print(f"--> Fish caught successfully! Server tally: {self.catch_count}/{self.max_catches}")
 
     def start(self):

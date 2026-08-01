@@ -425,6 +425,7 @@ class FishSniperUI(ctk.CTk):
 
         # Link global instances
         scanner.fish_loop = fish_loop
+        fish_loop.set_path_change_callback(self._on_active_path_changed)
 
         # Configure Grid Layout
         self.grid_columnconfigure(1, weight=1)
@@ -456,9 +457,15 @@ class FishSniperUI(ctk.CTk):
         self.status_pill = StatusPill(self.sidebar_frame)
         self.status_pill.grid(row=2, column=0, padx=20, pady=(0, 20), sticky="ew")
 
+        self.active_path_label = ctk.CTkLabel(
+            self.sidebar_frame, text="Active Path: Path 1", font=self.small_font,
+            text_color=THEME["accent"], anchor="w",
+        )
+        self.active_path_label.grid(row=3, column=0, padx=20, pady=(0, 10), sticky="ew")
+
         quick_card = ctk.CTkFrame(self.sidebar_frame, fg_color=THEME["card"], corner_radius=12,
                                    border_width=1, border_color=THEME["card_border"])
-        quick_card.grid(row=3, column=0, padx=20, pady=(0, 16), sticky="ew")
+        quick_card.grid(row=4, column=0, padx=20, pady=(0, 16), sticky="ew")
 
         ctk.CTkLabel(quick_card, text="FISHING SETUP", font=ctk.CTkFont(size=10, weight="bold"),
                      text_color=THEME["text_faint"]).pack(anchor="w", padx=14, pady=(12, 6))
@@ -477,6 +484,16 @@ class FishSniperUI(ctk.CTk):
                                                  button_hover_color=THEME["accent_hover"],
                                                  dropdown_fg_color=THEME["card"])
         self.speed_dropdown.pack(fill="x", padx=14, pady=(0, 10))
+
+        self._sidebar_field_label(quick_card, "Starting Path")
+        self.path_dropdown = ctk.CTkOptionMenu(
+            quick_card, values=[f"Path {number}" for number in range(1, 6)],
+            command=self.on_path_selection, fg_color=THEME["bg_alt"],
+            button_color=THEME["accent"], button_hover_color=THEME["accent_hover"],
+            dropdown_fg_color=THEME["card"],
+        )
+        self.path_dropdown.set("Path 1")
+        self.path_dropdown.pack(fill="x", padx=14, pady=(0, 10))
 
         self._sidebar_field_label(quick_card, "Max Fish")
         self.max_catches_entry = ctk.CTkEntry(quick_card, placeholder_text="1", fg_color=THEME["bg_alt"],
@@ -671,6 +688,19 @@ class FishSniperUI(ctk.CTk):
         if hasattr(self, "priority_board"):
             self.priority_board.render()
 
+    def on_path_selection(self, value):
+        try:
+            fish_loop.select_path(int(value.rsplit(" ", 1)[1]) - 1)
+        except (IndexError, ValueError):
+            return
+
+    def _on_active_path_changed(self, path_name):
+        """Receive path changes from the fishing thread without touching Tk off-thread."""
+        def update_ui():
+            self.active_path_label.configure(text=f"Active Path: {path_name}")
+            self.path_dropdown.set(path_name)
+        self.after(0, update_ui)
+
     def on_priority_changed(self):
         # Hook for future auto-persistence; currently a no-op, kept for clarity.
         pass
@@ -827,6 +857,14 @@ class FishSniperUI(ctk.CTk):
                     saved_speed = "Non Vip Pathing"
                 self.speed_dropdown.set(saved_speed)
 
+            selected_path = settings.get('selected_path', 1)
+            try:
+                selected_path = min(5, max(1, int(selected_path)))
+            except (TypeError, ValueError):
+                selected_path = 1
+            self.path_dropdown.set(f"Path {selected_path}")
+            fish_loop.select_path(selected_path - 1)
+
             # Load tokens
             if 'rb_token' in settings:
                 self.rb_token_entry.delete(0, 'end')
@@ -944,8 +982,13 @@ class FishSniperUI(ctk.CTk):
         except ValueError:
             sell_loops = 22
 
-        # Sync coordinates and speed
+        try:
+            selected_path = int(self.path_dropdown.get().rsplit(" ", 1)[1])
+        except (IndexError, ValueError):
+            selected_path = 1
+
         fish_loop.update_coordinates(res, speed, max_catches, sell_loops)
+        fish_loop.select_path(selected_path - 1)
 
         # Gather chosen biomes
         selected_biomes = self.get_enabled_biomes()
@@ -966,6 +1009,7 @@ class FishSniperUI(ctk.CTk):
             'speed': speed,
             'max_catches': max_catches,
             'sell_loops': sell_loops,
+            'selected_path': selected_path,
             'rb_token': rb_token,
             'ds_token': ds_token,
             'webhook_url': webhook_url,
@@ -982,6 +1026,7 @@ class FishSniperUI(ctk.CTk):
         print(f"Discord Token Entered: {'Yes' if len(ds_token) > 0 else 'No'}")
         print(f"Resolution: {res}")
         print(f"Pathing Mode: {speed}")
+        print(f"Starting Path: Path {selected_path}")
         print(f"Monitoring Biomes: {selected_biomes}")
         print(f"Server Configurations: {len(guild_mappings)} rules loaded.")
 
