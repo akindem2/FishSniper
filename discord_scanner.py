@@ -42,6 +42,16 @@ LOG_JOIN_CONFIRM_TIMEOUT = 150
 LOG_SCANNER_START_DELAY = 20
 LOG_POLL_INTERVAL = 0.1
 
+# How long _confirm_biome_session will block waiting for fish_loop to finish
+# capturing the join screenshot before giving up and sending the "Joined"
+# embed without one. Generous enough to comfortably cover the longest
+# legitimate capture path (10s load wait + up to 60s polling for the
+# in-game Start button + a few seconds of click delay) — this should only
+# ever trip when a screenshot was never going to be taken for this session
+# at all (e.g. the Start button check was bypassed or timed out), not
+# because a normal capture is just running a little late.
+JOIN_SCREENSHOT_WAIT_TIMEOUT = 90
+
 BIOME_LOG_DATA = [
     {"name": "NORMAL", "title": "Normal", "asset id": 80690294537387},
     {"name": "SNOWY", "title": "Snowy", "asset id": 109912975653138},
@@ -58,6 +68,7 @@ BIOME_LOG_DATA = [
     {"name": "CYBERSPACE", "title": "Cyberspace", "asset id": 89000537898277},
     {"name": "EGGLAND", "title": "Eggland", "asset id": 107114559110957},
     {"name": "SINGULARITY", "title": "Singularity", "asset id": 107114559110957},
+    {"name": "BLAZING SUN", "title": "Blazing Sun", "asset id": 70580600109957},
 ]
 
 LOG_GAME_MARKERS = ("Sol's RNG", DEFAULT_PLACE_ID)
@@ -161,6 +172,13 @@ PING_BIOME_NORMS = {normalize_biome_name(b) for b in ("Glitched", "Dreamspace", 
 
 def biome_should_ping(biome_name):
     return normalize_biome_name(biome_name) in PING_BIOME_NORMS
+
+
+# NOTE: Check-in screenshots are no longer hardcoded to specific biomes —
+# they're configured per-biome in the UI's Biomes tab (an expandable flap
+# under each biome card) and pushed in via Scanner.load_settings as
+# `checkin_screenshots`: {biome_title: {"enabled": bool, "delay": seconds}}.
+# See Scanner.checkin_screenshot_settings.
 
 
 # NOTE: Priority levels are no longer hardcoded here — they're configured in
@@ -783,13 +801,17 @@ class Scanner(discord.Client):
         self.discord_ping_user_id = None  # Discord user ID to @-ping on priority biome joins
         self.pending_join_url = None  # link/protocol used for the join currently being verified
         self.pending_join_is_priority_interrupt = False
+        self.pending_join_detected_at = None  # time.time() when the triggering Discord message was seen
         self.session_join_url = None  # same, but pinned to the confirmed active_biome_session
         self.session_is_priority_interrupt = False
+        self.session_detected_at = None  # same, but pinned to the confirmed active_biome_session
         self.log_monitor_thread = None
         self.log_monitor_stop = threading.Event()
         self.log_monitor_lock = threading.Lock()
         self.log_biome_confirmed = False
         self.assigned_log = None
+        self._checkin_followup_stop_event = None  # identity of the stop_event we've already scheduled a follow-up for
+        self.checkin_screenshot_settings = {}  # {normalized_biome_name: {"enabled": bool, "delay": seconds}}
 
     def biome_priority_level(self, biome_name):
         """
@@ -838,6 +860,7 @@ class Scanner(discord.Client):
             for biome in self.selected_biomes:
                 if re.search(r"\b" + re.escape(biome.lower()) + r"\b", clean_text):
                     canonical_new_biome = canonical_biome_title(biome)
+                    message_detected_at = time.time()
 
                     is_priority_interrupt = False
 
@@ -885,6 +908,7 @@ class Scanner(discord.Client):
                         if success:
                             self.pending_join_url = raw_url
                             self.pending_join_is_priority_interrupt = is_priority_interrupt
+                            self.pending_join_detected_at = message_detected_at
                             self._start_log_monitor(biome)
                         
                         return
@@ -924,6 +948,7 @@ class Scanner(discord.Client):
             self.log_biome_confirmed = False
             self.session_join_url = self.pending_join_url
             self.session_is_priority_interrupt = self.pending_join_is_priority_interrupt
+            self.session_detected_at = self.pending_join_detected_at
 
             self.log_monitor_thread = threading.Thread(
                 target=self._monitor_joined_biome_log,
@@ -987,7 +1012,7 @@ class Scanner(discord.Client):
             detected_norm = normalize_biome_name(current_biome)
             if detected_norm in selected_norms:
                 print(f"[Log Scanner] Current biome confirmed: {current_biome} — starting to fish!")
-                self._confirm_biome_session(current_biome)
+                self._confirm_biome_session(current_biome, stop_event)
             else:
                 print(f"[Log Scanner] Landed in '{current_biome}' (not a target). Resuming Discord scan.")
                 self._finish_biome_session(
@@ -1037,7 +1062,7 @@ class Scanner(discord.Client):
                             # Still in a target biome (could be a biome-to-biome transition)
                             if self.active_biome_session != detected_biome:
                                 print(f"[Log Scanner] Biome updated to '{detected_biome}' — still a target, continuing to fish.")
-                                self._confirm_biome_session(detected_biome)
+                                self._confirm_biome_session(detected_biome, stop_event)
                         else:
                             # Biome changed to something we don't want — hop servers
                             print(f"[Log Scanner] Biome changed to '{detected_biome}' (not a target). Stopping fishing and resuming Discord scan.")
@@ -1054,7 +1079,80 @@ class Scanner(discord.Client):
                 print(f"[Log Scanner] Error while monitoring log: {e}")
                 time.sleep(0.5)
 
-    def _confirm_biome_session(self, biome):
+    def _wait_for_join_screenshot(self, stop_event=None, poll_interval=0.5,
+                                   timeout=JOIN_SCREENSHOT_WAIT_TIMEOUT):
+        """Blocks until fish_loop has captured this session's join screenshot,
+        so the "Joined" embed always goes out with one attached rather than
+        firing without it just because confirmation happened first. Bails out
+        early (returning None) if this session gets abandoned while waiting —
+        a priority interrupt, the bot/scanner stopping, etc. — and gives up
+        after `timeout` seconds so a session that was never going to get a
+        screenshot (Start button check bypassed or timed out) can't hang this
+        thread forever."""
+        deadline = time.time() + timeout
+        while True:
+            if self.fish_loop and getattr(self.fish_loop, "last_join_screenshot", None):
+                return self.fish_loop.last_join_screenshot
+            if stop_event is not None and stop_event.is_set():
+                return None
+            if not self.is_running:
+                return None
+            if not self.fish_loop or not self.fish_loop.is_running:
+                return None
+            if time.time() >= deadline:
+                print(
+                    f"[Discord Scanner] Gave up waiting for the join screenshot after "
+                    f"{timeout}s; sending the Joined embed without one."
+                )
+                return None
+            time.sleep(poll_interval)
+
+    def _schedule_checkin_screenshot(self, biome, stop_event, delay):
+        """Captures and sends a second screenshot `delay` seconds after a
+        Glitched/Dreamspace/Cyberspace confirmation — but only if that same
+        biome session is still active at that point. If it ends (biome
+        change, priority interrupt, bot/scanner stop) before the delay
+        elapses, this exits quietly without capturing or sending anything."""
+
+        def still_this_session():
+            return not stop_event.is_set() and self.active_biome_session == biome and self.is_running
+
+        def wait_then_send():
+            deadline = time.time() + delay
+            while time.time() < deadline:
+                if not still_this_session():
+                    print(f"[Discord Scanner] {biome} ended before the check-in mark; skipping the follow-up screenshot.")
+                    return
+                time.sleep(0.5)
+
+            if not still_this_session():
+                print(f"[Discord Scanner] {biome} ended before the check-in mark; skipping the follow-up screenshot.")
+                return
+
+            if not self.fish_loop:
+                return
+
+            screenshot_bytes = self.fish_loop.capture_screenshot()
+            if not screenshot_bytes:
+                print(f"[Discord Scanner] Could not capture the {biome} check-in screenshot.")
+                return
+
+            # Re-check right before sending — the capture itself takes a
+            # moment, and we don't want to post a shot for a session that
+            # just ended.
+            if not still_this_session():
+                print(f"[Discord Scanner] {biome} ended just as the check-in screenshot finished; discarding it.")
+                return
+
+            if self.webhook_url:
+                from webhook import Webhook
+                Webhook(self.webhook_url).send_screenshot(
+                    screenshot_bytes, title=f"{biome}: Check-in Screenshot (+{delay}s)"
+                )
+
+        threading.Thread(target=wait_then_send, daemon=True).start()
+
+    def _confirm_biome_session(self, biome, stop_event=None):
         if self.log_biome_confirmed and self.active_biome_session == biome:
             return
 
@@ -1065,12 +1163,24 @@ class Scanner(discord.Client):
             self.ui_reference.update_status(f"Fishing in {biome}...")
         if self.webhook_url:
             from webhook import Webhook
+            screenshot_bytes = self._wait_for_join_screenshot(stop_event)
             Webhook(self.webhook_url).send_biome_joined(
                 biome,
                 join_url=self.session_join_url,
                 is_priority_interrupt=self.session_is_priority_interrupt,
                 ping_user_id=self.discord_ping_user_id,
+                screenshot_bytes=screenshot_bytes,
             )
+
+        norm = normalize_biome_name(biome)
+        biome_checkin_config = self.checkin_screenshot_settings.get(norm)
+        if (biome_checkin_config
+                and biome_checkin_config.get("enabled")
+                and biome_checkin_config.get("delay")
+                and stop_event is not None
+                and self._checkin_followup_stop_event is not stop_event):
+            self._checkin_followup_stop_event = stop_event
+            self._schedule_checkin_screenshot(biome, stop_event, int(biome_checkin_config["delay"]))
 
     def _finish_biome_session(self, biome, reason, observed_biome=None, detail=None):
         with self.log_monitor_lock:
@@ -1087,9 +1197,12 @@ class Scanner(discord.Client):
         if reason == "ended":
             observed = f" New biome: {observed_biome}." if observed_biome else ""
             print(f"[Log Scanner] Biome ended: {biome}.{observed} Resuming Discord scan.")
+            duration_seconds = (
+                time.time() - self.session_detected_at if self.session_detected_at is not None else None
+            )
             if self.webhook_url:
                 from webhook import Webhook
-                Webhook(self.webhook_url).send_biome_ended(biome)
+                Webhook(self.webhook_url).send_biome_ended(biome, duration_seconds=duration_seconds)
         else:
             observed = f" Observed: {observed_biome}." if observed_biome else ""
             extra = f" {detail}." if detail else ""
@@ -1099,7 +1212,7 @@ class Scanner(discord.Client):
             self.ui_reference.update_status("Scanning for biomes...")
 
     def load_settings(self, token, biomes, cookie, mappings, webhook_url, ui_ref=None, biome_priority_levels=None,
-                       discord_ping_user_id=None):
+                       discord_ping_user_id=None, checkin_screenshots=None):
         self.token = token
         self.selected_biomes = [canonical_biome_title(biome) for biome in biomes]
         self.roblox_cookie = cookie
@@ -1110,6 +1223,14 @@ class Scanner(discord.Client):
         if biome_priority_levels is not None:
             self.biome_priority_levels = {
                 normalize_biome_name(biome): level for biome, level in biome_priority_levels.items()
+            }
+        if checkin_screenshots is not None:
+            self.checkin_screenshot_settings = {
+                normalize_biome_name(biome): {
+                    "enabled": bool(config.get("enabled", False)),
+                    "delay": int(config.get("delay", 0) or 0),
+                }
+                for biome, config in checkin_screenshots.items()
             }
 
     def toggle_on(self):

@@ -41,13 +41,26 @@ def tier_color(tier_index):
 
 
 BIOMES = ["Rainy", "Snowy", "Windy", "Hell", "Heaven", "Corruption", "Starfall", "Sand Storm", "Null",
-          "Glitched", "Dreamspace", "Cyberspace", "Singularity"]
+          "Glitched", "Dreamspace", "Cyberspace", "Singularity", "Blazing Sun"]
 
 BIOME_ICONS = {
     "Rainy": "🌧️", "Snowy": "❄️", "Windy": "💨", "Hell": "🔥", "Heaven": "☁️",
     "Corruption": "☠️", "Starfall": "🌠", "Sand Storm": "🏜️", "Null": "⬛",
     "Glitched": "🧩", "Dreamspace": "💤", "Cyberspace": "🖥️", "Singularity": "🌀",
+    "Blazing Sun": "☀️",
 }
+
+# Default check-in screenshot config used only to seed a sensible starting
+# point the first time each biome's flap is built (or when no saved value
+# exists yet). Every biome gets a flap now — these three are just pre-enabled
+# with their original delays; everything else starts disabled with a
+# reasonable default delay that the user can turn on and tweak.
+DEFAULT_CHECKIN_SCREENSHOT_CONFIG = {
+    "Glitched": {"enabled": True, "delay": 20},
+    "Dreamspace": {"enabled": True, "delay": 20},
+    "Cyberspace": {"enabled": True, "delay": 60},
+}
+DEFAULT_CHECKIN_DELAY = 30  # seed delay for biomes with no default above
 
 # ---------------------------------------------------------------------------
 # Biome thumbnails (downloaded lazily on a background thread; emoji above are
@@ -129,21 +142,81 @@ def save_settings_to_file(settings_data):
         print(f"[Settings Save Error] Could not save settings: {e}")
 
 
+# ---------------------------------------------------------------------------
+# Log line coloring — each line in the Dashboard log box is colored based on
+# which subsystem ("worker") printed it, read from its leading "[Tag]".
+# Explicit "...Error" tags always win over their subsystem's color, so
+# failures still stand out even within a busy log.
+# ---------------------------------------------------------------------------
+LOG_LINE_COLOR_GROUPS = [
+    (("[Webhook Error]", "[Settings Save Error]", "[Settings Load Error]"), "#ef4444"),
+    (("[Fishing Bot]", "[Pathing]", "[Auto-Sell]"), "#38bdf8"),
+    (("[Discord Scanner]", "[Log Scanner]"), "#a78bfa"),
+    (("[Roblox Launcher]", "[Resolver]"), "#f472b6"),
+    (("[Webhook]",), "#22c55e"),
+    (("[FishSniper]",), "#fbbf24"),
+    (("[System]", "[UI]", "[Settings]", "[Settings Saved]"), "#9ca3af"),
+]
+
+
+def _color_for_log_line(line):
+    stripped = line.lstrip()
+    for prefixes, color in LOG_LINE_COLOR_GROUPS:
+        if stripped.startswith(prefixes):
+            return color
+    return THEME["text"]
+
+
 class DualLogger(object):
+    """Mirrors stdout/stderr into the Dashboard log textbox, colorizing each
+    line based on which subsystem printed it (its leading "[Tag]"), so
+    fishing/pathing, Discord scanning, webhook, and system messages are easy
+    to tell apart at a glance."""
+
     def __init__(self, widget, original_stdout):
         self.widget = widget
         self.original_stdout = original_stdout
+        self._buffer = ""
+        self._configured_tags = set()
 
     def write(self, text):
         if self.original_stdout is not None:
             self.original_stdout.write(text)
             self.original_stdout.flush()
 
+        # print() writes the message and its trailing newline as two
+        # separate write() calls, so lines are buffered here and only
+        # emitted — with a color read from their own prefix — once a
+        # newline actually arrives.
+        self._buffer += text
+        *complete_lines, self._buffer = self._buffer.split("\n")
+        for line in complete_lines:
+            self._emit_line(line + "\n")
+
+    def _emit_line(self, line_with_newline):
+        color = _color_for_log_line(line_with_newline)
+
         def append():
-            self.widget.configure(state="normal")
-            self.widget.insert("end", text)
-            self.widget.see("end")
-            self.widget.configure(state="disabled")
+            try:
+                tag = f"logcolor_{color.lstrip('#')}"
+                if tag not in self._configured_tags:
+                    self.widget.tag_config(tag, foreground=color)
+                    self._configured_tags.add(tag)
+                self.widget.configure(state="normal")
+                self.widget.insert("end", line_with_newline, tag)
+                self.widget.see("end")
+                self.widget.configure(state="disabled")
+            except Exception:
+                # A logging hiccup (e.g. an unexpected textbox API) should
+                # never take the whole app down — fall back to a plain,
+                # uncolored insert instead.
+                try:
+                    self.widget.configure(state="normal")
+                    self.widget.insert("end", line_with_newline)
+                    self.widget.see("end")
+                    self.widget.configure(state="disabled")
+                except Exception:
+                    pass
         self.widget.after(0, append)
 
     def flush(self):
@@ -426,6 +499,7 @@ class FishSniperUI(ctk.CTk):
         # Link global instances
         scanner.fish_loop = fish_loop
         fish_loop.set_path_change_callback(self._on_active_path_changed)
+        fish_loop.set_failsafe_callback(self._on_fishing_failsafe)
 
         # Configure Grid Layout
         self.grid_columnconfigure(1, weight=1)
@@ -501,13 +575,13 @@ class FishSniperUI(ctk.CTk):
         self.max_catches_entry.pack(fill="x", padx=14, pady=(0, 10))
         self.max_catches_entry.insert(0, "1")
 
-        self._sidebar_field_label(quick_card, "Sell Loops (22 = all)")
-        self.sell_loops_entry = ctk.CTkEntry(quick_card, placeholder_text="22", fg_color=THEME["bg_alt"],
+        self._sidebar_field_label(quick_card, "Sell Loops (56 = all)")
+        self.sell_loops_entry = ctk.CTkEntry(quick_card, placeholder_text="56", fg_color=THEME["bg_alt"],
                                               border_color=THEME["card_border"])
         self.sell_loops_entry.pack(fill="x", padx=14, pady=(0, 14))
-        self.sell_loops_entry.insert(0, "22")
+        self.sell_loops_entry.insert(0, "56")
 
-        self.save_bottom = ctk.CTkButton(self.sidebar_frame, text="💾  Save Settings", command=self.save_settings,
+        self.save_bottom = ctk.CTkButton(self.sidebar_frame, text="💾Save Settings", command=self.save_settings,
                                           fg_color=THEME["accent2"], hover_color=THEME["accent2_hover"],
                                           height=38, corner_radius=10)
         self.save_bottom.grid(row=10, column=0, padx=20, pady=(0, 20), sticky="sew")
@@ -520,11 +594,11 @@ class FishSniperUI(ctk.CTk):
                                        text_color=THEME["text"])
         self.tabview.grid(row=0, column=1, padx=(16, 20), pady=20, sticky="nsew")
 
-        self.tab_dash = self.tabview.add("📋 Dashboard")
-        self.tab_auth = self.tabview.add("⚙️ Settings")
-        self.tab_biomes = self.tabview.add("🌍 Biomes")
-        self.tab_priority = self.tabview.add("🏆 Priority")
-        self.tab_servers = self.tabview.add("💬 Servers")
+        self.tab_dash = self.tabview.add("Dashboard")
+        self.tab_auth = self.tabview.add("Settings")
+        self.tab_biomes = self.tabview.add("Biomes")
+        self.tab_priority = self.tabview.add("Priority")
+        self.tab_servers = self.tabview.add("Servers")
 
         self._build_dashboard_tab()
         self._build_settings_tab()
@@ -562,6 +636,28 @@ class FishSniperUI(ctk.CTk):
         entry.grid(row=index * 2 + 1, column=0, padx=16, pady=(0, 16 if last else 4), sticky="ew")
         return entry
 
+    def _webhook_field(self, card, index, label_text, placeholder, last=False):
+        """Like _credential_field, but pairs the entry with a Test button so
+        the user can verify the webhook URL actually works."""
+        pady_top = 16 if index == 0 else 14
+        ctk.CTkLabel(card, text=label_text, font=self.normal_font, text_color=THEME["text_dim"]).grid(
+            row=index * 2, column=0, columnspan=2, padx=16, pady=(pady_top, 4), sticky="w")
+
+        row_frame = ctk.CTkFrame(card, fg_color="transparent")
+        row_frame.grid(row=index * 2 + 1, column=0, columnspan=2, padx=16, pady=(0, 16 if last else 4),
+                        sticky="ew")
+        row_frame.grid_columnconfigure(0, weight=1)
+
+        entry = ctk.CTkEntry(row_frame, placeholder_text=placeholder, fg_color=THEME["bg_alt"],
+                              border_color=THEME["card_border"], height=34)
+        entry.grid(row=0, column=0, sticky="ew")
+
+        test_btn = ctk.CTkButton(row_frame, text="Test", width=64, height=34, command=self.test_webhook,
+                                  fg_color=THEME["accent2"], hover_color=THEME["accent2_hover"])
+        test_btn.grid(row=0, column=1, padx=(8, 0))
+
+        return entry, test_btn
+
     def _server_field(self, parent, placeholder, last=False):
         entry = ctk.CTkEntry(parent, placeholder_text=placeholder, fg_color=THEME["bg_alt"],
                               border_color=THEME["card_border"], height=28)
@@ -598,13 +694,13 @@ class FishSniperUI(ctk.CTk):
         card.grid(row=1, column=0, padx=4, pady=(0, 10), sticky="ew")
         card.grid_columnconfigure(0, weight=1)
 
-        self.rb_token_entry = self._credential_field(card, 0, "🎮 Roblox Cookie (.ROBLOSECURITY)",
+        self.rb_token_entry = self._credential_field(card, 0, "Roblox Cookie (.ROBLOSECURITY)",
                                                        "Enter Roblox Cookie")
-        self.ds_token_entry = self._credential_field(card, 1, "💬 Discord User Token", "Enter Discord Token")
-        self.ds_webhook_entry = self._credential_field(card, 2, "🔔 Discord Webhook URL (Optional)",
-                                                         "Enter Discord Webhook URL")
+        self.ds_token_entry = self._credential_field(card, 1, "Discord User Token", "Enter Discord Token")
+        self.ds_webhook_entry, self.webhook_test_btn = self._webhook_field(
+            card, 2, "Discord Webhook URL (Optional)", "Enter Discord Webhook URL")
         self.ds_ping_user_id_entry = self._credential_field(
-            card, 3, "📣 Discord User ID to Ping (Optional)",
+            card, 3, "Discord User ID to Ping (Optional)",
             "Pinged on Glitched / Dreamspace / Cyberspace joins", last=True)
 
     def _build_biomes_tab(self):
@@ -621,6 +717,11 @@ class FishSniperUI(ctk.CTk):
 
         self.biome_switches = {}
         self.biome_icon_labels = {}
+        self.checkin_switches = {}
+        self.checkin_delay_entries = {}
+        self.checkin_flaps = {}
+        self.checkin_expand_btns = {}
+        self.checkin_flap_expanded = {}
         for i, biome in enumerate(BIOMES):
             row, col = divmod(i, 3)
             card = ctk.CTkFrame(self.scroll_biomes, fg_color=THEME["card"], corner_radius=10,
@@ -644,6 +745,69 @@ class FishSniperUI(ctk.CTk):
                                     text_color=THEME["text"])
             switch.pack(side="left")
             self.biome_switches[biome] = switch
+
+            # Every biome gets an expandable check-in-screenshot flap, not
+            # just a fixed set — the delay (and whether it's on at all) is
+            # fully configurable per biome from here.
+            expand_btn = ctk.CTkButton(row_frame, text="⌄", width=22, height=22,
+                                        font=ctk.CTkFont(size=12), fg_color="transparent",
+                                        hover_color=THEME["card_hover"], text_color=THEME["text_dim"],
+                                        command=lambda b=biome: self.toggle_checkin_flap(b))
+            expand_btn.pack(side="right")
+            self.checkin_expand_btns[biome] = expand_btn
+            self.checkin_flap_expanded[biome] = False
+
+            default_config = DEFAULT_CHECKIN_SCREENSHOT_CONFIG.get(
+                biome, {"enabled": False, "delay": DEFAULT_CHECKIN_DELAY})
+
+            flap = ctk.CTkFrame(card, fg_color=THEME["bg_alt"], corner_radius=8)
+            self.checkin_flaps[biome] = flap  # not packed yet — starts collapsed
+
+            checkin_switch = ctk.CTkSwitch(flap, text="📸 Check-in Screenshot", font=self.small_font,
+                                            progress_color=THEME["accent2"], text_color=THEME["text_dim"])
+            if default_config["enabled"]:
+                checkin_switch.select()
+            checkin_switch.pack(anchor="w", padx=10, pady=(8, 6))
+            self.checkin_switches[biome] = checkin_switch
+
+            delay_row = ctk.CTkFrame(flap, fg_color="transparent")
+            delay_row.pack(anchor="w", fill="x", padx=10, pady=(0, 4))
+            ctk.CTkLabel(delay_row, text="Delay (sec):", font=self.small_font,
+                         text_color=THEME["text_faint"]).pack(side="left")
+            delay_entry = ctk.CTkEntry(delay_row, width=56, height=24, font=self.small_font,
+                                        fg_color=THEME["card"], border_color=THEME["card_border"])
+            delay_entry.insert(0, str(default_config["delay"]))
+            delay_entry.pack(side="left", padx=(6, 0))
+            self.checkin_delay_entries[biome] = delay_entry
+
+            ctk.CTkLabel(
+                flap, text="Sends a follow-up screenshot this many seconds after the biome is "
+                           "confirmed (skipped if it ends first).",
+                font=self.small_font, text_color=THEME["text_faint"], wraplength=190, justify="left",
+            ).pack(anchor="w", padx=10, pady=(0, 8))
+
+    def toggle_checkin_flap(self, biome):
+        """Expands or collapses the check-in screenshot flap under a biome card."""
+        flap = self.checkin_flaps[biome]
+        expanded = self.checkin_flap_expanded.get(biome, False)
+        if expanded:
+            flap.pack_forget()
+            self.checkin_expand_btns[biome].configure(text="⌄")
+        else:
+            flap.pack(fill="x", padx=12, pady=(0, 10))
+            self.checkin_expand_btns[biome].configure(text="⌃")
+        self.checkin_flap_expanded[biome] = not expanded
+
+    def get_checkin_screenshot_settings(self):
+        settings = {}
+        for biome, switch in self.checkin_switches.items():
+            entry = self.checkin_delay_entries.get(biome)
+            try:
+                delay = max(0, int((entry.get() if entry else "").strip() or 0))
+            except ValueError:
+                delay = 0
+            settings[biome] = {"enabled": switch.get() == 1, "delay": delay}
+        return settings
 
     def _build_priority_tab(self):
         self.tab_priority.grid_columnconfigure(0, weight=1)
@@ -700,6 +864,24 @@ class FishSniperUI(ctk.CTk):
             self.active_path_label.configure(text=f"Active Path: {path_name}")
             self.path_dropdown.set(path_name)
         self.after(0, update_ui)
+
+    def _on_fishing_failsafe(self, failsafe_count, switched_path, screenshot_bytes):
+        """Received from the fishing thread when a no-bite failsafe fires.
+        Marshals onto the main thread to safely read the webhook URL entry,
+        then sends the alert on its own background thread so the network
+        call blocks neither the UI nor the fishing loop."""
+        def handle():
+            webhook_url = self.ds_webhook_entry.get().strip()
+            if not webhook_url or not webhook_url.startswith("http"):
+                return
+
+            def send():
+                from webhook import Webhook
+                Webhook(webhook_url).send_failsafe_triggered(failsafe_count, switched_path, screenshot_bytes)
+
+            threading.Thread(target=send, daemon=True).start()
+
+        self.after(0, handle)
 
     def on_priority_changed(self):
         # Hook for future auto-persistence; currently a no-op, kept for clarity.
@@ -768,6 +950,33 @@ class FishSniperUI(ctk.CTk):
         """Update the status pill from external calls"""
         color = THEME["text_faint"] if new_status.strip().lower() == "stopped" else THEME["accent"]
         self.status_pill.set_state(new_status, color)
+
+    def test_webhook(self):
+        """Sends a one-off test embed to the currently-entered webhook URL so
+        the user can confirm it's wired up correctly before relying on it."""
+        webhook_url = self.ds_webhook_entry.get().strip()
+        if not webhook_url or not webhook_url.startswith("http"):
+            messagebox.showerror("Webhook Test", "Enter a valid Discord webhook URL first.")
+            return
+
+        self.webhook_test_btn.configure(state="disabled", text="Testing...")
+
+        def run_test():
+            from webhook import Webhook
+            success = Webhook(webhook_url).send_test()
+            self.after(0, self._on_webhook_test_done, success)
+
+        threading.Thread(target=run_test, daemon=True).start()
+
+    def _on_webhook_test_done(self, success):
+        self.webhook_test_btn.configure(state="normal", text="Test")
+        if success:
+            messagebox.showinfo("Webhook Test", "Test message sent! Check your Discord channel.")
+        else:
+            messagebox.showerror(
+                "Webhook Test",
+                "Failed to send the test message. Double-check the URL and your connection\u2014see the Dashboard logs for details.",
+            )
 
     def start_sniping(self):
         # Legacy method - redirect to universal toggle
@@ -899,6 +1108,34 @@ class FishSniperUI(ctk.CTk):
                     else:
                         switch.deselect()
 
+            # Load check-in screenshot settings (defaults if absent, e.g. an
+            # older settings file saved before delays were configurable —
+            # that older format stored a plain bool per biome instead of
+            # {"enabled":, "delay":}, so both are handled here).
+            saved_checkin = settings.get('checkin_screenshots', {})
+            for biome, switch in self.checkin_switches.items():
+                default_config = DEFAULT_CHECKIN_SCREENSHOT_CONFIG.get(
+                    biome, {"enabled": False, "delay": DEFAULT_CHECKIN_DELAY})
+                saved = saved_checkin.get(biome, default_config)
+
+                if isinstance(saved, dict):
+                    enabled = saved.get("enabled", default_config["enabled"])
+                    delay = saved.get("delay", default_config["delay"])
+                else:
+                    # Old format: a plain bool.
+                    enabled = bool(saved)
+                    delay = default_config["delay"]
+
+                if enabled:
+                    switch.select()
+                else:
+                    switch.deselect()
+
+                delay_entry = self.checkin_delay_entries.get(biome)
+                if delay_entry is not None:
+                    delay_entry.delete(0, 'end')
+                    delay_entry.insert(0, str(delay))
+
             # Load guild mappings into the guild entries
             if 'guild_mappings' in settings and settings['guild_mappings']:
                 while len(self.guild_entries) > 1:
@@ -998,10 +1235,12 @@ class FishSniperUI(ctk.CTk):
 
         biome_priority_levels = dict(self.priority_board.assignments)
         num_tiers = self.priority_board.num_tiers
+        checkin_screenshots = self.get_checkin_screenshot_settings()
 
         # Sync values inside running Scanner Thread instance
         scanner.load_settings(ds_token, selected_biomes, rb_token, guild_mappings, webhook_url, self,
-                               biome_priority_levels, discord_ping_user_id=ping_user_id)
+                               biome_priority_levels, discord_ping_user_id=ping_user_id,
+                               checkin_screenshots=checkin_screenshots)
 
         # Save settings to LOCALAPPDATA
         settings_data = {
@@ -1018,6 +1257,7 @@ class FishSniperUI(ctk.CTk):
             'guild_mappings': guild_mappings,
             'biome_priority_levels': biome_priority_levels,
             'num_tiers': num_tiers,
+            'checkin_screenshots': checkin_screenshots,
         }
         save_settings_to_file(settings_data)
 
@@ -1044,6 +1284,8 @@ class FishSniperUI(ctk.CTk):
 
         guild_mappings = self._collect_guild_mappings()
         biome_priority_levels = dict(self.priority_board.assignments)
+        checkin_screenshots = self.get_checkin_screenshot_settings()
 
         scanner.load_settings(ds_token, selected_biomes, rb_token, guild_mappings, webhook_url, self,
-                               biome_priority_levels, discord_ping_user_id=ping_user_id)
+                               biome_priority_levels, discord_ping_user_id=ping_user_id,
+                               checkin_screenshots=checkin_screenshots)

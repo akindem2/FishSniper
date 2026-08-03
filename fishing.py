@@ -1,3 +1,4 @@
+import io
 import time
 import pyautogui
 import pydirectinput
@@ -24,7 +25,7 @@ COORDS = {
         },
         "MERCHANT": {
             "CAMERA_SETUP_1": (47, 467),
-            "CAMERA_SETUP_2": (382, 126),
+            "CAMERA_SETUP_2": (382, 140),
             "OPEN_MERCHANT_1": (956, 803),
             "OPEN_MERCHANT_2": (956, 938),
             "SELECT_FISH": (828, 404),
@@ -245,6 +246,10 @@ class FishSolBot:
         self.preferred_path_index = 0
         self.consecutive_failsafes = 0
         self.path_change_callback = None
+        self.failsafe_callback = None
+        self.last_join_screenshot = None
+        self.session_id = 0
+        self._active_session_id = None
         
         # Initialize default variables (Replaces all the global variables)
         self.update_coordinates("1080p", "Normal")
@@ -260,6 +265,31 @@ class FishSolBot:
         return (abs(c1[0] - c2[0]) <= tol and 
                 abs(c1[1] - c2[1]) <= tol and 
                 abs(c1[2] - c2[2]) <= tol)
+
+    def _cycle_active(self):
+        """True while the currently-executing fishing cycle is still the one
+        FishSniper actually wants running. `is_running` alone isn't enough:
+        the Discord scanner can toggle it back on for a brand-new server join
+        while an old, abandoned cycle (e.g. one aborted mid-pathing because
+        of a fake-biome detection) is still blocked inside a long sleep/hold
+        and hasn't reached a check yet. Comparing the session stamp captured
+        at the start of that specific cycle catches this: a stale cycle sees
+        the mismatch and bails out even though is_running now reads True
+        again for the unrelated new session."""
+        return self.is_running and self._active_session_id == self.session_id
+
+    def _interruptible_sleep(self, duration, chunk=0.1):
+        """Sleeps in small increments, checking _cycle_active() between each,
+        so an abandoned cycle can bail out quickly instead of blocking a
+        held key or click sequence for the full duration."""
+        end_time = time.time() + duration
+        while True:
+            if not self._cycle_active():
+                return
+            remaining = end_time - time.time()
+            if remaining <= 0:
+                return
+            time.sleep(min(chunk, remaining))
 
     def focus_roblox(self):
         roblox_hwnd = None
@@ -359,6 +389,33 @@ class FishSolBot:
     def set_path_change_callback(self, callback):
         self.path_change_callback = callback
 
+    def set_failsafe_callback(self, callback):
+        """callback(failsafe_count, switched_path, screenshot_bytes) — fired
+        every time record_fishing_failsafe() runs, e.g. so the UI can send a
+        webhook alert without fishing.py needing to know about webhooks."""
+        self.failsafe_callback = callback
+
+    def capture_screenshot(self):
+        """Grabs a full-screen screenshot and returns it as PNG bytes, or None
+        on failure. Generic helper — used for the join screenshot as well as
+        any other on-demand screenshot (e.g. a delayed biome check-in shot)."""
+        try:
+            screenshot = ImageGrab.grab()
+            buffer = io.BytesIO()
+            screenshot.save(buffer, format="PNG")
+            return buffer.getvalue()
+        except Exception as e:
+            print(f"[Fishing Bot] Failed to capture screenshot: {e}")
+            return None
+
+    def capture_join_screenshot(self):
+        """Grabs a full-screen screenshot right after clicking a server's Start
+        button, before any character-reset pathing begins, and holds onto it in
+        memory. The Discord scanner attaches this to the "Joined: {biome}"
+        webhook embed once it confirms the biome from the Roblox logs, which
+        happens later/asynchronously — so the embed is fine to be delayed."""
+        self.last_join_screenshot = self.capture_screenshot()
+
     def select_path(self, path_index):
         """Set the manually selected starting path (zero-based index)."""
         if not self.path_profiles:
@@ -369,21 +426,34 @@ class FishSolBot:
         self._apply_active_path()
 
     def begin_server_session(self):
-        """Reset path failover state when the scanner joins a new server."""
-        self.active_path_index = min(self.preferred_path_index, len(self.path_profiles) - 1)
+        """Runs when the scanner joins a new server. Only clears the failsafe
+        counter — the active path itself is intentionally left as-is. If a
+        failsafe switched it mid-session, that stays the active path on the
+        next server too, since the switch was presumably needed to work
+        around something (a busy spot, bad timing, etc.) that isn't specific
+        to the server that just ended. It only resets back to a specific
+        path via an explicit select_path() call (the UI's Starting Path
+        dropdown)."""
         self.consecutive_failsafes = 0
         self._apply_active_path()
 
     def record_fishing_failsafe(self):
         self.consecutive_failsafes += 1
-        print(f"[Fishing Bot] Failsafe {self.consecutive_failsafes}/2 on the current server.")
-        if self.consecutive_failsafes < 2 or len(self.path_profiles) < 2:
-            return
+        failsafe_count = self.consecutive_failsafes
+        print(f"[Fishing Bot] Failsafe {failsafe_count}/2 on the current server.")
 
-        self.active_path_index = (self.active_path_index + 1) % len(self.path_profiles)
-        self.consecutive_failsafes = 0
-        self._apply_active_path()
-        print("[Fishing Bot] Two consecutive failsafes: switched to the next path profile.")
+        screenshot_bytes = self.capture_screenshot()
+        switched_path = False
+
+        if self.consecutive_failsafes >= 2 and len(self.path_profiles) >= 2:
+            self.active_path_index = (self.active_path_index + 1) % len(self.path_profiles)
+            self.consecutive_failsafes = 0
+            self._apply_active_path()
+            switched_path = True
+            print("[Fishing Bot] Two consecutive failsafes: switched to the next path profile.")
+
+        if self.failsafe_callback:
+            self.failsafe_callback(failsafe_count, switched_path, screenshot_bytes)
 
     def record_successful_catch(self):
         if self.consecutive_failsafes:
@@ -391,6 +461,8 @@ class FishSolBot:
         self.consecutive_failsafes = 0
 
     def reset_character(self):
+        if not self._cycle_active():
+            return
         print("[Pathing] Resetting character...")
         time.sleep(0.2)
         pydirectinput.press('esc')
@@ -398,7 +470,7 @@ class FishSolBot:
         pydirectinput.press('r')
         time.sleep(0.2)
         pydirectinput.press('enter')
-        time.sleep(2.6)
+        self._interruptible_sleep(2.6)
 
     def setup_camera(self):
         print("[Pathing] Setting up camera orientation...")
@@ -417,14 +489,14 @@ class FishSolBot:
         
         # Zoom all the way in
         for _ in range(16):
-            if not self.is_running: return
+            if not self._cycle_active(): return
             pyautogui.scroll(500)
             time.sleep(0.01)
         time.sleep(0.2)
         
         # Zoom out slightly to optimal position
         for _ in range(7):
-            if not self.is_running: return
+            if not self._cycle_active(): return
             pyautogui.scroll(-300)
             time.sleep(0.01)
         time.sleep(0.1)
@@ -433,41 +505,59 @@ class FishSolBot:
         print("[Pathing] Walking to merchant...")
         pydirectinput.keyDown('w')
         pydirectinput.keyDown('a')
-        time.sleep(self.ALIGNMENT1)
-        if not self.is_running: 
+        self._interruptible_sleep(self.ALIGNMENT1)
+        if not self._cycle_active(): 
             pydirectinput.keyUp('w'); pydirectinput.keyUp('a')
             return
             
         pydirectinput.keyUp('w')
-        time.sleep(self.ALIGNMENT2)
+        self._interruptible_sleep(self.ALIGNMENT2)
         pydirectinput.keyUp('a')
+        if not self._cycle_active():
+            return
         time.sleep(0.2)
         
         pydirectinput.keyDown('w')
-        time.sleep(self.ALIGNMENT3)
+        self._interruptible_sleep(self.ALIGNMENT3)
         pydirectinput.keyUp('w')
+        if not self._cycle_active():
+            return
         time.sleep(0.3)
         
         pydirectinput.keyDown('d')
-        time.sleep(self.MERCHANT1)
+        self._interruptible_sleep(self.MERCHANT1)
         pydirectinput.keyUp('d')
+        if not self._cycle_active():
+            return
         time.sleep(0.15)
         
         pydirectinput.keyDown('w')
-        time.sleep(self.MERCHANT2)
+        self._interruptible_sleep(self.MERCHANT2)
+        if not self._cycle_active():
+            pydirectinput.keyUp('w')
+            return
         #pydirectinput.keyDown('space')
-        time.sleep(self.MERCHANT3)
+        self._interruptible_sleep(self.MERCHANT3)
         pydirectinput.keyUp('w')
+        if not self._cycle_active():
+            return
         pydirectinput.keyDown('s')
-        time.sleep(self.ALIGNMENT15)
+        self._interruptible_sleep(self.ALIGNMENT15)
         pydirectinput.keyUp('s')
+        if not self._cycle_active():
+            return
         pydirectinput.keyDown('w')
-        time.sleep(self.MERCHANT5)
+        self._interruptible_sleep(self.MERCHANT5)
+        if not self._cycle_active():
+            pydirectinput.keyUp('w')
+            return
         pydirectinput.keyDown('space')
-        time.sleep(self.MERCHANT6)
+        self._interruptible_sleep(self.MERCHANT6)
         pydirectinput.keyUp('space')
         pydirectinput.keyUp('w')
         #pydirectinput.keyUp('space')
+        if not self._cycle_active():
+            return
         time.sleep(0.3)
         
         #pydirectinput.keyDown('a')
@@ -490,7 +580,7 @@ class FishSolBot:
         time.sleep(0.2)
 
         while True:
-            if not self.is_running: return
+            if not self._cycle_active(): return
             
             pydirectinput.moveTo(self.OPEN_MERCHANT_2[0], self.OPEN_MERCHANT_2[1] - 3)
             pydirectinput.moveTo(self.OPEN_MERCHANT_2[0], self.OPEN_MERCHANT_2[1], duration=0.2)
@@ -513,7 +603,7 @@ class FishSolBot:
 
         print("[Auto-Sell] Selling fish...")
         for _ in range(self.sell_loops):  
-            if not self.is_running: return
+            if not self._cycle_active(): return
             
             pydirectinput.moveTo(self.SELECT_FISH[0], self.SELECT_FISH[1] - 50)
             pydirectinput.moveTo(self.SELECT_FISH[0], self.SELECT_FISH[1], duration=0.2)
@@ -534,23 +624,23 @@ class FishSolBot:
             pydirectinput.moveTo(self.CONFIRM_SELL[0] - 3, self.CONFIRM_SELL[1], duration=0.2)
             time.sleep(0.1)
             pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
-            time.sleep(1.0)
+            self._interruptible_sleep(1.0)
 
     def walk_back_to_spot(self):
         profile = self.path_profiles[self.active_path_index]
         print(f"[Pathing] Following {profile['name']} from merchant to fishing spot...")
         for action in profile["actions"]:
-            if not self.is_running:
+            if not self._cycle_active():
                 return
             try:
                 kind = action[0]
                 if kind == "wait":
-                    time.sleep(float(action[1]))
+                    self._interruptible_sleep(float(action[1]))
                 elif kind == "hold":
                     key, duration = action[1], float(action[2])
                     pydirectinput.keyDown(key)
                     try:
-                        time.sleep(duration)
+                        self._interruptible_sleep(duration)
                     finally:
                         pydirectinput.keyUp(key)
                 elif kind == "press":
@@ -573,15 +663,15 @@ class FishSolBot:
     def do_pathing_routine(self, do_sell=True):
         print(f"=== PATHING ROUTINE STARTED (Selling: {do_sell}) ===")
         self.reset_character()
-        if not self.is_running: return
+        if not self._cycle_active(): return
         self.setup_camera()
-        if not self.is_running: return
+        if not self._cycle_active(): return
         self.walk_to_merchant()
-        if not self.is_running: return
+        if not self._cycle_active(): return
         
         if do_sell:
             self.sell_fish_logic()
-            if not self.is_running: return
+            if not self._cycle_active(): return
             
         self.walk_back_to_spot()
         if do_sell:
@@ -589,6 +679,12 @@ class FishSolBot:
         print("=== PATHING COMPLETE. READY TO FISH ===")
 
     def play_fishing_cycle(self):
+        # Stamp this invocation with the current session. If the scanner
+        # abandons this server (fake biome, priority interrupt, manual stop)
+        # partway through and later resumes for a different server, this
+        # stamp will no longer match self.session_id, so every check below
+        # correctly treats this invocation as stale rather than continuing.
+        self._active_session_id = self.session_id
         self.focus_roblox()
 
         # 0A. New Server Load Wait / Start Button Verification
@@ -600,7 +696,7 @@ class FishSolBot:
 
             print("[Fishing Bot] Waiting 10 seconds for Roblox to load before checking for Start button...")
             for _ in range(20):
-                if not self.is_running: return
+                if not self._cycle_active(): return
                 time.sleep(0.5)
 
             print("[Fishing Bot] Checking for Start button...")
@@ -608,7 +704,7 @@ class FishSolBot:
             button_clicked = False
 
             while time.time() - wait_start < 60:
-                if not self.is_running: return
+                if not self._cycle_active(): return
                 
                 try:
                     current_color = self.get_pixel_color(*self.START_BUTTON_POS)
@@ -636,6 +732,16 @@ class FishSolBot:
 
             if not button_clicked:
                 print("[Fishing Bot] Start button not found or timed out. Assuming already in-game.")
+            else:
+                # Capture proof-of-join before any character-reset pathing begins;
+                # it gets attached to the "Joined" webhook embed once the biome
+                # is confirmed from the Roblox logs. Waits a beat after the click
+                # so the screenshot doesn't catch the button's click animation
+                # mid-frame.
+                self._interruptible_sleep(1.0)
+                if self._cycle_active():
+                    print("[Fishing Bot] Capturing join screenshot...")
+                    self.capture_join_screenshot()
 
             self.is_waiting_for_start_button = False
             self.has_done_initial_pathing = False
@@ -643,9 +749,9 @@ class FishSolBot:
 
         # 0B. Initial Pathing
         if not self.has_done_initial_pathing:
-            print("Detected first run! Walking to fishing spot...")
-            self.do_pathing_routine(do_sell=False) 
-            if self.is_running:
+            print("Detected first run! Selling out any leftover inventory before heading to the fishing spot...")
+            self.do_pathing_routine(do_sell=True)
+            if self._cycle_active():
                 self.has_done_initial_pathing = True
             return
 
@@ -666,7 +772,7 @@ class FishSolBot:
         pydirectinput.mouseUp()
         time.sleep(0.3)
 
-        if not self.is_running:
+        if not self._cycle_active():
             return
 
         start_wait = time.time()
@@ -674,7 +780,7 @@ class FishSolBot:
 
         # 2. Wait for bite
         while time.time() - start_wait < MAX_WAIT_FOR_BITE:
-            if not self.is_running:
+            if not self._cycle_active():
                 return
 
             pixel = self.get_pixel_color(*self.BITE_INDICATOR_POS)
@@ -711,7 +817,7 @@ class FishSolBot:
         minigame_start = time.time()
 
         while time.time() - minigame_start < MAX_MINIGAME_TIME:
-            if not self.is_running:
+            if not self._cycle_active():
                 return
 
             # Grab just the minigame region. (Much faster than whole screen)
@@ -771,7 +877,12 @@ class FishSolBot:
 
     def toggle_off(self):
         print("[System] Bot Paused")
+        self.session_id += 1
         self.is_running = False
+        # Clear out any screenshot from the session we're leaving — a new
+        # join (or a resumed pause) should never end up attaching a stale
+        # screenshot to the wrong server's "Joined" embed.
+        self.last_join_screenshot = None
         pydirectinput.keyUp('w')
         pydirectinput.keyUp('a')
         pydirectinput.keyUp('s')
