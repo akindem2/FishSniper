@@ -552,9 +552,13 @@ def _resolve_share_code(share_code: str):
 def _launch_deeplink(place_id: str, link_code: str):
     """
     Last-resort deep link launcher. Works if Roblox is installed and
-    registered as URL handler.
+    registered as a URL handler. Uses the modern
+    roblox://experiences/start?placeId=...&privateServerLinkCode=... scheme
+    — the older roblox://placeID=...&linkCode=... form isn't reliably
+    recognized by current Roblox clients, which was silently breaking
+    private-server launches every time this fallback got used.
     """
-    url = f"roblox://placeID={place_id}&linkCode={link_code}"
+    url = f"roblox://experiences/start?placeId={place_id}&privateServerLinkCode={link_code}"
     print(f"[Roblox Launcher] Launching via deep link: {url}")
     os.startfile(url)
     return True
@@ -563,10 +567,10 @@ def _launch_deeplink(place_id: str, link_code: str):
 def _launch_instance_deeplink(place_id: str, game_instance_id: str):
     """
     Deep link launcher for joining a specific already-running server
-    instance (not a private server). Works if Roblox is installed and
-    registered as a URL handler.
+    instance (not a private server). Uses the same modern
+    roblox://experiences/start URI scheme.
     """
-    url = f"roblox://placeID={place_id}&gameInstanceId={game_instance_id}"
+    url = f"roblox://experiences/start?placeId={place_id}&gameInstanceId={game_instance_id}"
     print(f"[Roblox Launcher] Launching instance via deep link: {url}")
     os.startfile(url)
     return True
@@ -692,15 +696,6 @@ def resolve_and_launch_with_cookie(raw_url, cookie):
                 place_id = public_match.group(1)
                 print(f"[Roblox Launcher] Detected Public Server. Place: {place_id}")
 
-    # Helper function to generate modern Roblox deep links
-    def get_modern_deep_link():
-        if share_code and not place_id:
-            return f"roblox://navigation/share_links?code={share_code}&type=Server"
-        dl = f"roblox://experiences/start?placeId={place_id}"
-        if link_code:
-            dl += f"&privateServerLinkCode={link_code}"
-        return dl
-
     if not place_id and not share_code:
         print("[Roblox Launcher] Failed to extract any valid Roblox joining data from the URL.")
         return False
@@ -812,6 +807,9 @@ class Scanner(discord.Client):
         self.assigned_log = None
         self._checkin_followup_stop_event = None  # identity of the stop_event we've already scheduled a follow-up for
         self.checkin_screenshot_settings = {}  # {normalized_biome_name: {"enabled": bool, "delay": seconds}}
+        self.fishing_enabled_biomes = {}  # {normalized_biome_name: bool}; missing entries default to enabled
+        self.log_watchdog_thread = None
+        self.log_watchdog_stop = None
 
     def biome_priority_level(self, biome_name):
         """
@@ -901,9 +899,21 @@ class Scanner(discord.Client):
                         
                         if success and self.fish_loop:
                             self.fish_loop.begin_server_session()
-                            self.fish_loop.is_waiting_for_start_button = True
-                            self.fish_loop.has_done_initial_pathing = False
-                            self.fish_loop.toggle_on()
+                            self.fish_loop.prepare_for_server_join()
+                            # Apply the expected biome's fishing toggle now,
+                            # from the Discord message itself, rather than
+                            # waiting for log confirmation (which can take
+                            # 20+ seconds) — otherwise the bot would still
+                            # walk to the spot and sell before finding out
+                            # it should have just sat at spawn instead.
+                            # _confirm_biome_session() re-applies this once
+                            # the real biome is confirmed from the logs, in
+                            # case this guess needs correcting.
+                            expected_norm = normalize_biome_name(canonical_new_biome)
+                            self.fish_loop.set_biome_fishing_enabled(
+                                self.fishing_enabled_biomes.get(expected_norm, True)
+                            )
+                            self.fish_loop.toggle_on(reset_initial_pathing=False)
                         
                         if success:
                             self.pending_join_url = raw_url
@@ -1173,6 +1183,11 @@ class Scanner(discord.Client):
             )
 
         norm = normalize_biome_name(biome)
+
+        if self.fish_loop:
+            fishing_enabled = self.fishing_enabled_biomes.get(norm, True)
+            self.fish_loop.set_biome_fishing_enabled(fishing_enabled)
+
         biome_checkin_config = self.checkin_screenshot_settings.get(norm)
         if (biome_checkin_config
                 and biome_checkin_config.get("enabled")
@@ -1181,6 +1196,129 @@ class Scanner(discord.Client):
                 and self._checkin_followup_stop_event is not stop_event):
             self._checkin_followup_stop_event = stop_event
             self._schedule_checkin_screenshot(biome, stop_event, int(biome_checkin_config["delay"]))
+
+    # ------------------------------------------------------------------
+    # Log health watchdog — runs for the whole time the scanner is on,
+    # independent of whether a specific biome is currently being tracked.
+    # The per-biome log monitor (_monitor_joined_biome_log) only exists
+    # while actively confirming/tracking one target biome; the moment that
+    # ends, its thread stops entirely, which would otherwise leave no one
+    # watching the log during a "keep fishing while scanning for the next
+    # biome" stretch. This watchdog covers that gap by watching whichever
+    # log is currently relevant on its own, the whole time the bot is on.
+    # ------------------------------------------------------------------
+
+    LOG_DISCONNECT_THRESHOLD = 60  # seconds of no log writes = assume Roblox disconnected
+    LOG_WATCHDOG_POLL_INTERVAL = 5
+    LOG_WATCHDOG_REFRESH_EVERY = 6  # re-identify the log every ~30s, so log rotation is picked up
+
+    def _start_log_watchdog(self):
+        self.log_watchdog_stop = threading.Event()
+        self.log_watchdog_thread = threading.Thread(
+            target=self._log_watchdog_loop, args=(self.log_watchdog_stop,), daemon=True,
+        )
+        self.log_watchdog_thread.start()
+
+    def _log_watchdog_loop(self, stop_event):
+        log_path = None
+        poll_count = 0
+
+        while self.is_running and not stop_event.is_set():
+            if stop_event.wait(self.LOG_WATCHDOG_POLL_INTERVAL):
+                return
+            if not self.is_running:
+                return
+
+            if not self.fish_loop or not self.fish_loop.is_running:
+                # Nothing actually in a server right now — nothing to watch.
+                log_path = None
+                poll_count = 0
+                continue
+
+            poll_count += 1
+            if log_path is None or poll_count % self.LOG_WATCHDOG_REFRESH_EVERY == 0:
+                candidate = identify_roblox_log(self.roblox_cookie)
+                if candidate:
+                    log_path = candidate
+
+            if not log_path:
+                continue
+
+            try:
+                age = time.time() - log_path.stat().st_mtime
+            except OSError:
+                continue
+
+            if age < self.LOG_DISCONNECT_THRESHOLD:
+                continue
+
+            print(f"[Log Scanner] No Roblox log activity for {int(age)}s — assuming a disconnect.")
+            self._handle_disconnect()
+
+            # Give the newly (re)joined session a fresh window before
+            # checking staleness again, and force a fresh log lookup.
+            log_path = None
+            poll_count = 0
+            stop_event.wait(self.LOG_DISCONNECT_THRESHOLD)
+
+    def _handle_disconnect(self):
+        """Called by the log watchdog after a sustained silence from the
+        Roblox log. Unlike a normal "biome ended" (which now deliberately
+        keeps fishing in place — see _finish_biome_session), a disconnect
+        means there's no live game session left to fish in at all, so this
+        always stops the fish loop first.
+        - If a specific biome was being tracked, that tracking ends and
+          Discord scanning resumes (equivalent to "start scanning again").
+        - If no biome was being tracked (already just scanning/fishing in
+          place with no target), "scanning again" would be a no-op, so
+          instead this rejoins a random public server on the same place,
+          ignoring any specific job/instance ID, to get unstuck.
+        """
+        was_tracking_biome = self.active_biome_session
+
+        with self.log_monitor_lock:
+            self.active_biome_session = None
+            self.log_biome_confirmed = False
+            self.log_monitor_stop.set()
+
+        if was_tracking_biome:
+            print(
+                f"[Log Scanner] Roblox appears to have disconnected while fishing "
+                f"'{was_tracking_biome}'. Stopping and resuming Discord scan."
+            )
+            if self.fish_loop:
+                self.fish_loop.toggle_off()
+            if self.ui_reference:
+                self.ui_reference.update_status("Scanning for biomes...")
+        else:
+            print("[Log Scanner] Roblox appears to have disconnected. Rejoining a random public server...")
+            self._rejoin_random_public_server()
+
+    def _rejoin_random_public_server(self):
+        """Rejoins a random public server for the configured place, ignoring
+        any specific job/instance ID (i.e. normal public matchmaking rather
+        than a targeted join) — used to recover when the bot wasn't
+        tracking a specific target biome, so there's nothing more specific
+        to fall back on, but the Roblox log has still gone stale."""
+        if self.fish_loop:
+            self.fish_loop.toggle_off()
+
+        url = f"roblox://experiences/start?placeId={DEFAULT_PLACE_ID}"
+        print(f"[Log Scanner] Launching recovery join: {url}")
+        try:
+            os.startfile(url)
+        except Exception as e:
+            print(f"[Log Scanner] Failed to launch recovery join: {e}")
+            return
+
+        if self.fish_loop:
+            self.fish_loop.begin_server_session()
+            self.fish_loop.prepare_for_server_join()
+            self.fish_loop.set_biome_fishing_enabled(True)  # unknown biome — default to fishing normally
+            self.fish_loop.toggle_on(reset_initial_pathing=False)
+
+        if self.ui_reference:
+            self.ui_reference.update_status("Reconnecting to a public server...")
 
     def _finish_biome_session(self, biome, reason, observed_biome=None, detail=None):
         with self.log_monitor_lock:
@@ -1191,28 +1329,41 @@ class Scanner(discord.Client):
             self.log_biome_confirmed = False
             self.log_monitor_stop.set()
 
-        if self.fish_loop:
-            self.fish_loop.toggle_off()
-
         if reason == "ended":
+            # The biome genuinely ended (the log now shows something else,
+            # or the fish loop already stopped on its own for an unrelated
+            # reason) — rather than stopping the bot while the Discord
+            # scanner looks for the next target biome, let it keep fishing
+            # right where it is. The moment a new biome is detected and a
+            # fresh join begins, on_message's own toggle_off() takes over
+            # from there, so this doesn't fight with that.
+            if self.fish_loop:
+                self.fish_loop.set_biome_fishing_enabled(True)
             observed = f" New biome: {observed_biome}." if observed_biome else ""
-            print(f"[Log Scanner] Biome ended: {biome}.{observed} Resuming Discord scan.")
+            print(f"[Log Scanner] Biome ended: {biome}.{observed} Continuing to fish while scanning for a new biome.")
             duration_seconds = (
                 time.time() - self.session_detected_at if self.session_detected_at is not None else None
             )
             if self.webhook_url:
                 from webhook import Webhook
                 Webhook(self.webhook_url).send_biome_ended(biome, duration_seconds=duration_seconds)
+            if self.ui_reference:
+                self.ui_reference.update_status("Fishing while scanning for biomes...")
         else:
+            # A "fake" biome means the join itself was never real to begin
+            # with (wrong link, stale announcement, etc.) — unlike a real
+            # ending, there's nothing worth continuing here, so the bot
+            # still stops and Discord scanning resumes on its own.
+            if self.fish_loop:
+                self.fish_loop.toggle_off()
             observed = f" Observed: {observed_biome}." if observed_biome else ""
             extra = f" {detail}." if detail else ""
             print(f"[Log Scanner] Fake biome detected for {biome}.{observed}{extra} Resuming Discord scan.")
-
-        if self.ui_reference:
-            self.ui_reference.update_status("Scanning for biomes...")
+            if self.ui_reference:
+                self.ui_reference.update_status("Scanning for biomes...")
 
     def load_settings(self, token, biomes, cookie, mappings, webhook_url, ui_ref=None, biome_priority_levels=None,
-                       discord_ping_user_id=None, checkin_screenshots=None):
+                       discord_ping_user_id=None, checkin_screenshots=None, fishing_enabled_biomes=None):
         self.token = token
         self.selected_biomes = [canonical_biome_title(biome) for biome in biomes]
         self.roblox_cookie = cookie
@@ -1232,12 +1383,17 @@ class Scanner(discord.Client):
                 }
                 for biome, config in checkin_screenshots.items()
             }
+        if fishing_enabled_biomes is not None:
+            self.fishing_enabled_biomes = {
+                normalize_biome_name(biome): bool(enabled) for biome, enabled in fishing_enabled_biomes.items()
+            }
 
     def toggle_on(self):
         print("[Discord Scanner] Started")
         self.is_running = True
         self.active_biome_session = None
         self.log_biome_confirmed = False
+        self._start_log_watchdog()
         if self.ui_reference:
             self.ui_reference.update_status("Scanning for biomes...")
 
@@ -1247,6 +1403,8 @@ class Scanner(discord.Client):
         self.active_biome_session = None
         self.log_biome_confirmed = False
         self.log_monitor_stop.set()
+        if self.log_watchdog_stop:
+            self.log_watchdog_stop.set()
 
     def start_scanner(self):
         """Start the Discord scanner"""

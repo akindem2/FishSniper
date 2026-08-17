@@ -11,6 +11,15 @@ from pathlib import Path
 import sys
 from tkinter import messagebox
 
+try:
+    import keyboard
+except Exception as e:
+    keyboard = None
+    print(f"[UI] 'keyboard' module unavailable — global hotkeys will be disabled: {e}")
+
+DEFAULT_START_HOTKEY = "f1"
+DEFAULT_STOP_HOTKEY = "f2"
+
 # ---------------------------------------------------------------------------
 # Theme
 # ---------------------------------------------------------------------------
@@ -581,7 +590,7 @@ class FishSniperUI(ctk.CTk):
         self.sell_loops_entry.pack(fill="x", padx=14, pady=(0, 14))
         self.sell_loops_entry.insert(0, "56")
 
-        self.save_bottom = ctk.CTkButton(self.sidebar_frame, text="💾Save Settings", command=self.save_settings,
+        self.save_bottom = ctk.CTkButton(self.sidebar_frame, text="💾  Save Settings", command=self.save_settings,
                                           fg_color=THEME["accent2"], hover_color=THEME["accent2_hover"],
                                           height=38, corner_radius=10)
         self.save_bottom.grid(row=10, column=0, padx=20, pady=(0, 20), sticky="sew")
@@ -594,11 +603,11 @@ class FishSniperUI(ctk.CTk):
                                        text_color=THEME["text"])
         self.tabview.grid(row=0, column=1, padx=(16, 20), pady=20, sticky="nsew")
 
-        self.tab_dash = self.tabview.add("Dashboard")
-        self.tab_auth = self.tabview.add("Settings")
-        self.tab_biomes = self.tabview.add("Biomes")
-        self.tab_priority = self.tabview.add("Priority")
-        self.tab_servers = self.tabview.add("Servers")
+        self.tab_dash = self.tabview.add("📋 Dashboard")
+        self.tab_auth = self.tabview.add("⚙️ Settings")
+        self.tab_biomes = self.tabview.add("🌍 Biomes")
+        self.tab_priority = self.tabview.add("🏆 Priority")
+        self.tab_servers = self.tabview.add("💬 Servers")
 
         self._build_dashboard_tab()
         self._build_settings_tab()
@@ -613,6 +622,7 @@ class FishSniperUI(ctk.CTk):
 
         # --- INITIALIZATION ---
         self.is_running = False
+        self._registered_hotkey_handles = []
 
         self.load_settings()
         self.initialize_scanner()
@@ -685,23 +695,108 @@ class FishSniperUI(ctk.CTk):
 
     def _build_settings_tab(self):
         self.tab_auth.grid_columnconfigure(0, weight=1)
+        self.tab_auth.grid_rowconfigure(0, weight=1)
 
-        ctk.CTkLabel(self.tab_auth, text="Credentials & Integrations", font=self.heading_font,
+        self.scroll_settings = ctk.CTkScrollableFrame(self.tab_auth, fg_color="transparent")
+        self.scroll_settings.grid(row=0, column=0, padx=2, pady=(0, 10), sticky="nsew")
+        self.scroll_settings.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(self.scroll_settings, text="Credentials & Integrations", font=self.heading_font,
                      text_color=THEME["text"]).grid(row=0, column=0, padx=4, pady=(6, 14), sticky="w")
 
-        card = ctk.CTkFrame(self.tab_auth, fg_color=THEME["card"], corner_radius=12, border_width=1,
+        card = ctk.CTkFrame(self.scroll_settings, fg_color=THEME["card"], corner_radius=12, border_width=1,
                              border_color=THEME["card_border"])
         card.grid(row=1, column=0, padx=4, pady=(0, 10), sticky="ew")
         card.grid_columnconfigure(0, weight=1)
 
-        self.rb_token_entry = self._credential_field(card, 0, "Roblox Cookie (.ROBLOSECURITY)",
+        self.rb_token_entry = self._credential_field(card, 0, "🎮 Roblox Cookie (.ROBLOSECURITY)",
                                                        "Enter Roblox Cookie")
-        self.ds_token_entry = self._credential_field(card, 1, "Discord User Token", "Enter Discord Token")
+        self.ds_token_entry = self._credential_field(card, 1, "💬 Discord User Token", "Enter Discord Token")
         self.ds_webhook_entry, self.webhook_test_btn = self._webhook_field(
-            card, 2, "Discord Webhook URL (Optional)", "Enter Discord Webhook URL")
+            card, 2, "🔔 Discord Webhook URL (Optional)", "Enter Discord Webhook URL")
         self.ds_ping_user_id_entry = self._credential_field(
-            card, 3, "Discord User ID to Ping (Optional)",
+            card, 3, "📣 Discord User ID to Ping (Optional)",
             "Pinged on Glitched / Dreamspace / Cyberspace joins", last=True)
+
+        ctk.CTkLabel(self.scroll_settings, text="Fishing Behavior", font=self.heading_font,
+                     text_color=THEME["text"]).grid(row=2, column=0, padx=4, pady=(14, 10), sticky="w")
+
+        behavior_card = ctk.CTkFrame(self.scroll_settings, fg_color=THEME["card"], corner_radius=12,
+                                      border_width=1, border_color=THEME["card_border"])
+        behavior_card.grid(row=3, column=0, padx=4, pady=(0, 10), sticky="ew")
+        behavior_card.grid_columnconfigure(0, weight=1)
+
+        self.sell_on_start_switch = ctk.CTkSwitch(
+            behavior_card, text="💰 Sell inventory when FishSniper starts", font=self.normal_font,
+            progress_color=THEME["accent"], text_color=THEME["text"])
+        self.sell_on_start_switch.select()  # enabled by default
+        self.sell_on_start_switch.grid(row=0, column=0, padx=16, pady=(16, 4), sticky="w")
+
+        ctk.CTkLabel(
+            behavior_card,
+            text="Sells off any existing inventory on the first server joined after pressing Start, "
+                 "before fishing begins. Later server joins in the same run are unaffected.",
+            font=self.small_font, text_color=THEME["text_dim"], wraplength=600, justify="left",
+        ).grid(row=1, column=0, padx=16, pady=(0, 16), sticky="w")
+
+        afk_row = ctk.CTkFrame(behavior_card, fg_color="transparent")
+        afk_row.grid(row=2, column=0, padx=16, pady=(0, 6), sticky="w")
+        ctk.CTkLabel(afk_row, text="🕹️ Anti-AFK interval while not fishing (sec):",
+                     font=self.normal_font, text_color=THEME["text"]).pack(side="left")
+        self.anti_afk_interval_entry = ctk.CTkEntry(afk_row, width=70, height=28, font=self.normal_font,
+                                                      fg_color=THEME["bg_alt"], border_color=THEME["card_border"])
+        self.anti_afk_interval_entry.insert(0, "300")
+        self.anti_afk_interval_entry.pack(side="left", padx=(10, 0))
+
+        ctk.CTkLabel(
+            behavior_card,
+            text="How often the bot focuses the window and presses space while sitting in a biome "
+                 "that has fishing turned off (see the Biomes tab). Default is 300 seconds (5 minutes).",
+            font=self.small_font, text_color=THEME["text_dim"], wraplength=600, justify="left",
+        ).grid(row=3, column=0, padx=16, pady=(0, 16), sticky="w")
+
+        ctk.CTkLabel(self.scroll_settings, text="Hotkeys", font=self.heading_font,
+                     text_color=THEME["text"]).grid(row=4, column=0, padx=4, pady=(14, 10), sticky="w")
+
+        hotkey_card = ctk.CTkFrame(self.scroll_settings, fg_color=THEME["card"], corner_radius=12,
+                                    border_width=1, border_color=THEME["card_border"])
+        hotkey_card.grid(row=5, column=0, padx=4, pady=(0, 10), sticky="ew")
+        hotkey_card.grid_columnconfigure(0, weight=1)
+
+        start_hotkey_row = ctk.CTkFrame(hotkey_card, fg_color="transparent")
+        start_hotkey_row.grid(row=0, column=0, padx=16, pady=(16, 6), sticky="w")
+        ctk.CTkLabel(start_hotkey_row, text="Start hotkey:", font=self.normal_font,
+                     text_color=THEME["text"]).pack(side="left")
+        self.start_hotkey_entry = ctk.CTkEntry(start_hotkey_row, width=100, height=28, font=self.normal_font,
+                                                fg_color=THEME["bg_alt"], border_color=THEME["card_border"])
+        self.start_hotkey_entry.insert(0, DEFAULT_START_HOTKEY)
+        self.start_hotkey_entry.pack(side="left", padx=(10, 0))
+
+        stop_hotkey_row = ctk.CTkFrame(hotkey_card, fg_color="transparent")
+        stop_hotkey_row.grid(row=1, column=0, padx=16, pady=(0, 6), sticky="w")
+        ctk.CTkLabel(stop_hotkey_row, text="Stop hotkey: ", font=self.normal_font,
+                     text_color=THEME["text"]).pack(side="left")
+        self.stop_hotkey_entry = ctk.CTkEntry(stop_hotkey_row, width=100, height=28, font=self.normal_font,
+                                               fg_color=THEME["bg_alt"], border_color=THEME["card_border"])
+        self.stop_hotkey_entry.insert(0, DEFAULT_STOP_HOTKEY)
+        self.stop_hotkey_entry.pack(side="left", padx=(10, 0))
+
+        self.hotkey_status_label = ctk.CTkLabel(
+            hotkey_card, text="", font=self.small_font, text_color=THEME["text_faint"],
+            wraplength=600, justify="left",
+        )
+        self.hotkey_status_label.grid(row=2, column=0, padx=16, pady=(0, 6), sticky="w")
+
+        ctk.CTkLabel(
+            hotkey_card,
+            text="Work globally, even while Roblox is focused. Use names like 'f1' or combos like "
+                 "'ctrl+alt+s'. Applies immediately and is saved with your other settings.",
+            font=self.small_font, text_color=THEME["text_dim"], wraplength=600, justify="left",
+        ).grid(row=3, column=0, padx=16, pady=(0, 16), sticky="w")
+
+        for entry in (self.start_hotkey_entry, self.stop_hotkey_entry):
+            entry.bind("<Return>", lambda e: self.apply_hotkeys())
+            entry.bind("<FocusOut>", lambda e: self.apply_hotkeys())
 
     def _build_biomes_tab(self):
         self.tab_biomes.grid_columnconfigure(0, weight=1)
@@ -717,6 +812,7 @@ class FishSniperUI(ctk.CTk):
 
         self.biome_switches = {}
         self.biome_icon_labels = {}
+        self.fish_switches = {}
         self.checkin_switches = {}
         self.checkin_delay_entries = {}
         self.checkin_flaps = {}
@@ -763,11 +859,25 @@ class FishSniperUI(ctk.CTk):
             flap = ctk.CTkFrame(card, fg_color=THEME["bg_alt"], corner_radius=8)
             self.checkin_flaps[biome] = flap  # not packed yet — starts collapsed
 
+            fish_switch = ctk.CTkSwitch(flap, text="🎣 Fish This Biome", font=self.small_font,
+                                         progress_color=THEME["accent"], text_color=THEME["text_dim"])
+            fish_switch.select()  # enabled by default
+            fish_switch.pack(anchor="w", padx=10, pady=(10, 2))
+            self.fish_switches[biome] = fish_switch
+
+            ctk.CTkLabel(
+                flap, text="When off, the bot just sits in this biome (with anti-AFK) instead of fishing.",
+                font=self.small_font, text_color=THEME["text_faint"], wraplength=190, justify="left",
+            ).pack(anchor="w", padx=10, pady=(0, 8))
+
+            divider = ctk.CTkFrame(flap, fg_color=THEME["card_border"], height=1)
+            divider.pack(fill="x", padx=10, pady=(0, 8))
+
             checkin_switch = ctk.CTkSwitch(flap, text="📸 Check-in Screenshot", font=self.small_font,
                                             progress_color=THEME["accent2"], text_color=THEME["text_dim"])
             if default_config["enabled"]:
                 checkin_switch.select()
-            checkin_switch.pack(anchor="w", padx=10, pady=(8, 6))
+            checkin_switch.pack(anchor="w", padx=10, pady=(0, 6))
             self.checkin_switches[biome] = checkin_switch
 
             delay_row = ctk.CTkFrame(flap, fg_color="transparent")
@@ -808,6 +918,9 @@ class FishSniperUI(ctk.CTk):
                 delay = 0
             settings[biome] = {"enabled": switch.get() == 1, "delay": delay}
         return settings
+
+    def get_fishing_enabled_settings(self):
+        return {biome: (switch.get() == 1) for biome, switch in self.fish_switches.items()}
 
     def _build_priority_tab(self):
         self.tab_priority.grid_columnconfigure(0, weight=1)
@@ -865,7 +978,7 @@ class FishSniperUI(ctk.CTk):
             self.path_dropdown.set(path_name)
         self.after(0, update_ui)
 
-    def _on_fishing_failsafe(self, failsafe_count, switched_path, screenshot_bytes):
+    def _on_fishing_failsafe(self, failsafe_count, switched_path, screenshot_bytes, triggered_sell):
         """Received from the fishing thread when a no-bite failsafe fires.
         Marshals onto the main thread to safely read the webhook URL entry,
         then sends the alert on its own background thread so the network
@@ -877,7 +990,8 @@ class FishSniperUI(ctk.CTk):
 
             def send():
                 from webhook import Webhook
-                Webhook(webhook_url).send_failsafe_triggered(failsafe_count, switched_path, screenshot_bytes)
+                Webhook(webhook_url).send_failsafe_triggered(
+                    failsafe_count, switched_path, screenshot_bytes, triggered_sell)
 
             threading.Thread(target=send, daemon=True).start()
 
@@ -916,35 +1030,103 @@ class FishSniperUI(ctk.CTk):
 
     def toggle_universal(self):
         """Universal start/stop button with intelligent state management"""
+        if not self.is_running:
+            self.start_fishsniper()
+        else:
+            self.stop_fishsniper()
+
+    def start_fishsniper(self):
+        """Starts the scanner if it isn't already running. Safe to call
+        repeatedly (e.g. from a hotkey) — a no-op if already started."""
+        if self.is_running:
+            return
+        if not self.validate_priority_assignments():
+            return
+
         from webhook import Webhook
         webhook_url = self.ds_webhook_entry.get().strip()
 
+        # STARTING: Begin with scanner active
+        self.is_running = True
+        self.universal_button.configure(text="■  Stop FishSniper", fg_color=THEME["danger"],
+                                         hover_color=THEME["danger_hover"])
+        self.update_status("Scanning for biomes...")
+
+        self.save_settings()  # Auto-sync before launching scanner
+        if self.sell_on_start_switch.get() == 1:
+            fish_loop.request_startup_sell()
+        scanner.toggle_on()
+        print("[FishSniper] Started - Scanner active, waiting for biome detection")
+        Webhook(webhook_url).send_app_started()
+
+    def stop_fishsniper(self):
+        """Stops the scanner if it's running. Safe to call repeatedly (e.g.
+        from a hotkey) — a no-op if already stopped."""
         if not self.is_running:
-            if not self.validate_priority_assignments():
-                return
+            return
 
-            # STARTING: Begin with scanner active
-            self.is_running = True
-            self.universal_button.configure(text="■  Stop FishSniper", fg_color=THEME["danger"],
-                                             hover_color=THEME["danger_hover"])
-            self.update_status("Scanning for biomes...")
+        from webhook import Webhook
+        webhook_url = self.ds_webhook_entry.get().strip()
 
-            self.save_settings()  # Auto-sync before launching scanner
-            scanner.toggle_on()
-            print("[FishSniper] Started - Scanner active, waiting for biome detection")
-            Webhook(webhook_url).send_app_started()
+        # STOPPING: Stop everything
+        self.is_running = False
+        self.universal_button.configure(text="▶  Start FishSniper", fg_color=THEME["success"],
+                                         hover_color=THEME["success_hover"])
+        self.update_status("Stopped")
 
+        scanner.toggle_off()
+        fish_loop.toggle_off()
+        print("[FishSniper] Stopped - All systems paused")
+        Webhook(webhook_url).send_app_stopped()
+
+    def apply_hotkeys(self):
+        """(Re-)registers the global start/stop hotkeys from whatever's
+        currently in the entry fields. Safe to call repeatedly — always
+        unhooks any hotkeys this app previously registered first, so
+        changing a hotkey and calling this again doesn't leave the old
+        binding active too. These work globally (even while Roblox is
+        focused), since they're OS-level hooks via the 'keyboard' package
+        rather than Tkinter key bindings."""
+        if keyboard is None:
+            self.hotkey_status_label.configure(
+                text="Hotkeys unavailable — the 'keyboard' package failed to load.",
+                text_color=THEME["danger"],
+            )
+            return
+
+        for hotkey_handle in self._registered_hotkey_handles:
+            try:
+                keyboard.remove_hotkey(hotkey_handle)
+            except (KeyError, ValueError):
+                pass
+        self._registered_hotkey_handles = []
+
+        start_key = self.start_hotkey_entry.get().strip() or DEFAULT_START_HOTKEY
+        stop_key = self.stop_hotkey_entry.get().strip() or DEFAULT_STOP_HOTKEY
+
+        errors = []
+        try:
+            handle = keyboard.add_hotkey(start_key, lambda: self.after(0, self.start_fishsniper))
+            self._registered_hotkey_handles.append(handle)
+        except Exception as e:
+            errors.append(f"start hotkey '{start_key}': {e}")
+
+        try:
+            handle = keyboard.add_hotkey(stop_key, lambda: self.after(0, self.stop_fishsniper))
+            self._registered_hotkey_handles.append(handle)
+        except Exception as e:
+            errors.append(f"stop hotkey '{stop_key}': {e}")
+
+        if errors:
+            self.hotkey_status_label.configure(
+                text="Could not register — " + "; ".join(errors), text_color=THEME["danger"],
+            )
+            print(f"[UI] Hotkey registration error(s): {'; '.join(errors)}")
         else:
-            # STOPPING: Stop everything
-            self.is_running = False
-            self.universal_button.configure(text="▶  Start FishSniper", fg_color=THEME["success"],
-                                             hover_color=THEME["success_hover"])
-            self.update_status("Stopped")
-
-            scanner.toggle_off()
-            fish_loop.toggle_off()
-            print("[FishSniper] Stopped - All systems paused")
-            Webhook(webhook_url).send_app_stopped()
+            self.hotkey_status_label.configure(
+                text=f"Active — Start: '{start_key}'   Stop: '{stop_key}'", text_color=THEME["success"],
+            )
+            print(f"[UI] Hotkeys registered — Start: '{start_key}', Stop: '{stop_key}'")
 
     def update_status(self, new_status):
         """Update the status pill from external calls"""
@@ -1050,6 +1232,7 @@ class FishSniperUI(ctk.CTk):
             print("[Settings] No saved settings found, using defaults")
             self.priority_board.seed_defaults()
             self.priority_board.render()
+            self.apply_hotkeys()
             return
 
         try:
@@ -1099,6 +1282,22 @@ class FishSniperUI(ctk.CTk):
                 self.sell_loops_entry.delete(0, 'end')
                 self.sell_loops_entry.insert(0, str(settings['sell_loops']))
 
+            if settings.get('sell_on_start', True):
+                self.sell_on_start_switch.select()
+            else:
+                self.sell_on_start_switch.deselect()
+
+            anti_afk_interval = settings.get('anti_afk_interval', 300)
+            self.anti_afk_interval_entry.delete(0, 'end')
+            self.anti_afk_interval_entry.insert(0, str(anti_afk_interval))
+            fish_loop.set_anti_afk_interval(anti_afk_interval)
+
+            self.start_hotkey_entry.delete(0, 'end')
+            self.start_hotkey_entry.insert(0, settings.get('start_hotkey', DEFAULT_START_HOTKEY))
+            self.stop_hotkey_entry.delete(0, 'end')
+            self.stop_hotkey_entry.insert(0, settings.get('stop_hotkey', DEFAULT_STOP_HOTKEY))
+            self.apply_hotkeys()
+
             # Load selected biomes
             if 'selected_biomes' in settings:
                 for biome in BIOMES:
@@ -1107,6 +1306,16 @@ class FishSniperUI(ctk.CTk):
                         switch.select()
                     else:
                         switch.deselect()
+
+            # Load per-biome fishing-enabled toggles (default enabled if
+            # absent, e.g. an older settings file saved before this feature
+            # existed).
+            saved_fishing_enabled = settings.get('fishing_enabled_biomes', {})
+            for biome, switch in self.fish_switches.items():
+                if saved_fishing_enabled.get(biome, True):
+                    switch.select()
+                else:
+                    switch.deselect()
 
             # Load check-in screenshot settings (defaults if absent, e.g. an
             # older settings file saved before delays were configurable —
@@ -1180,6 +1389,7 @@ class FishSniperUI(ctk.CTk):
         except Exception as e:
             print(f"[Settings Load Error] Error loading settings: {e}")
             self.priority_board.render()
+            self.apply_hotkeys()
 
     def _collect_guild_mappings(self):
         guild_mappings = []
@@ -1215,17 +1425,24 @@ class FishSniperUI(ctk.CTk):
             max_catches = 1
 
         try:
-            sell_loops = int(self.sell_loops_entry.get().strip() or "22")
+            sell_loops = int(self.sell_loops_entry.get().strip() or "56")
         except ValueError:
-            sell_loops = 22
+            sell_loops = 56
 
         try:
             selected_path = int(self.path_dropdown.get().rsplit(" ", 1)[1])
         except (IndexError, ValueError):
             selected_path = 1
 
+        try:
+            anti_afk_interval = max(1, int(self.anti_afk_interval_entry.get().strip() or "300"))
+        except ValueError:
+            anti_afk_interval = 300
+
         fish_loop.update_coordinates(res, speed, max_catches, sell_loops)
         fish_loop.select_path(selected_path - 1)
+        fish_loop.set_anti_afk_interval(anti_afk_interval)
+        self.apply_hotkeys()
 
         # Gather chosen biomes
         selected_biomes = self.get_enabled_biomes()
@@ -1236,11 +1453,13 @@ class FishSniperUI(ctk.CTk):
         biome_priority_levels = dict(self.priority_board.assignments)
         num_tiers = self.priority_board.num_tiers
         checkin_screenshots = self.get_checkin_screenshot_settings()
+        fishing_enabled_biomes = self.get_fishing_enabled_settings()
 
         # Sync values inside running Scanner Thread instance
         scanner.load_settings(ds_token, selected_biomes, rb_token, guild_mappings, webhook_url, self,
                                biome_priority_levels, discord_ping_user_id=ping_user_id,
-                               checkin_screenshots=checkin_screenshots)
+                               checkin_screenshots=checkin_screenshots,
+                               fishing_enabled_biomes=fishing_enabled_biomes)
 
         # Save settings to LOCALAPPDATA
         settings_data = {
@@ -1258,6 +1477,11 @@ class FishSniperUI(ctk.CTk):
             'biome_priority_levels': biome_priority_levels,
             'num_tiers': num_tiers,
             'checkin_screenshots': checkin_screenshots,
+            'sell_on_start': self.sell_on_start_switch.get() == 1,
+            'fishing_enabled_biomes': fishing_enabled_biomes,
+            'anti_afk_interval': anti_afk_interval,
+            'start_hotkey': self.start_hotkey_entry.get().strip() or DEFAULT_START_HOTKEY,
+            'stop_hotkey': self.stop_hotkey_entry.get().strip() or DEFAULT_STOP_HOTKEY,
         }
         save_settings_to_file(settings_data)
 
@@ -1285,7 +1509,9 @@ class FishSniperUI(ctk.CTk):
         guild_mappings = self._collect_guild_mappings()
         biome_priority_levels = dict(self.priority_board.assignments)
         checkin_screenshots = self.get_checkin_screenshot_settings()
+        fishing_enabled_biomes = self.get_fishing_enabled_settings()
 
         scanner.load_settings(ds_token, selected_biomes, rb_token, guild_mappings, webhook_url, self,
                                biome_priority_levels, discord_ping_user_id=ping_user_id,
-                               checkin_screenshots=checkin_screenshots)
+                               checkin_screenshots=checkin_screenshots,
+                               fishing_enabled_biomes=fishing_enabled_biomes)

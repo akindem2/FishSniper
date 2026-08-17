@@ -80,7 +80,7 @@ class Webhook:
             fields.append({"name": "Priority Interrupt", "value": "Jumped the queue for this biome", "inline": False})
 
         embed = {
-            "title": f"Joined {biome}",
+            "title": f"Joining: {biome}",
             "color": discord.Color.blue().value,
             "thumbnail": {"url": biome_thumbnail_url(biome)},
         }
@@ -89,9 +89,9 @@ class Webhook:
 
         files = None
         if screenshot_bytes:
-            filename = "join_screenshot.png"
+            filename = "join_screenshot.jpg"
             embed["image"] = {"url": f"attachment://{filename}"}
-            files = {"file": (filename, screenshot_bytes, "image/png")}
+            files = {"file": (filename, screenshot_bytes, "image/jpeg")}
 
         content = None
         if ping_user_id and biome_should_ping(biome):
@@ -99,7 +99,7 @@ class Webhook:
 
         self._send(embed, content=content, files=files)
 
-    def send_screenshot(self, image_bytes, title="Screenshot", filename="screenshot.png"):
+    def send_screenshot(self, image_bytes, title="Screenshot", filename="screenshot.jpg"):
         """Uploads a standalone screenshot embed, independent of the Joined
         embed — e.g. the delayed Cyberspace check-in shot."""
         embed = {
@@ -107,28 +107,31 @@ class Webhook:
             "color": discord.Color.teal().value,
             "image": {"url": f"attachment://{filename}"},
         }
-        files = {"file": (filename, image_bytes, "image/png")}
+        files = {"file": (filename, image_bytes, "image/jpeg")}
         self._send(embed, files=files)
 
-    def send_failsafe_triggered(self, failsafe_count, switched_path=False, screenshot_bytes=None):
+    def send_failsafe_triggered(self, failsafe_count, switched_path=False, screenshot_bytes=None,
+                                 triggered_sell=False):
         """Alerts when no bite was detected within the wait window and a
         failsafe recovery kicked in — useful for spotting a stuck or
         misconfigured session remotely."""
         description = f"No bite detected — failsafe {failsafe_count}/2 on this server."
         if switched_path:
             description += " Switched to the next path profile."
+        if triggered_sell:
+            description += " 5 failsafes in a row — selling off inventory and restarting the fishing cycle."
 
         embed = {
-            "title": "No-Bite Failsafe Triggered",
+            "title": "Repeated Failsafes — Selling & Restarting" if triggered_sell else "No-Bite Failsafe Triggered",
             "description": description,
-            "color": discord.Color.orange().value,
+            "color": discord.Color.red().value if triggered_sell else discord.Color.orange().value,
         }
 
         files = None
         if screenshot_bytes:
-            filename = "failsafe_screenshot.png"
+            filename = "failsafe_screenshot.jpg"
             embed["image"] = {"url": f"attachment://{filename}"}
-            files = {"file": (filename, screenshot_bytes, "image/png")}
+            files = {"file": (filename, screenshot_bytes, "image/jpeg")}
 
         self._send(embed, files=files)
 

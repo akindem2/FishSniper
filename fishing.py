@@ -2,7 +2,7 @@ import io
 import time
 import pyautogui
 import pydirectinput
-from PIL import ImageGrab
+from PIL import Image, ImageGrab
 import win32gui
 import win32con
 import ctypes
@@ -226,8 +226,9 @@ MAX_WAIT_FOR_CAST = 35
 
 # User-configurable start button detection values.
 START_BUTTON_COLOR = (127, 255, 147)
-START_BUTTON_COLOR_TOLERANCE = 15
+START_BUTTON_COLOR_TOLERANCE = 5
 START_BUTTON_WAIT_TIMEOUT = 120
+WAIT_FOR_START_BUTTON_TIME = 15
 
 class FishSolBot:
     def __init__(self):
@@ -239,17 +240,22 @@ class FishSolBot:
         
         self.catch_count = 0
         self.max_catches = 1
-        self.sell_loops = 22
+        self.sell_loops = 56
         self.cast_fail_count = 0
         self.path_profiles = []
         self.active_path_index = 0
         self.preferred_path_index = 0
         self.consecutive_failsafes = 0
+        self.total_consecutive_failsafes = 0  # not reset by path switching — drives the sell-recovery threshold
         self.path_change_callback = None
         self.failsafe_callback = None
         self.last_join_screenshot = None
         self.session_id = 0
         self._active_session_id = None
+        self.needs_startup_sell = False
+        self.fishing_enabled = True  # whether to actually fish in the currently confirmed biome
+        self.anti_afk_interval = 300  # seconds between anti-AFK key presses while not fishing (default 5 min)
+        self._last_anti_afk_press = None
         
         # Initialize default variables (Replaces all the global variables)
         self.update_coordinates("1080p", "Normal")
@@ -318,7 +324,7 @@ class FishSolBot:
         except Exception as e:
             return False
     
-    def update_coordinates(self, resolution, speed="Normal", max_catches=1, sell_loops=22):
+    def update_coordinates(self, resolution, speed="Normal", max_catches=1, sell_loops=56):
         self.max_catches = int(max_catches)
         self.sell_loops = int(sell_loops)
 
@@ -390,19 +396,86 @@ class FishSolBot:
         self.path_change_callback = callback
 
     def set_failsafe_callback(self, callback):
-        """callback(failsafe_count, switched_path, screenshot_bytes) — fired
-        every time record_fishing_failsafe() runs, e.g. so the UI can send a
-        webhook alert without fishing.py needing to know about webhooks."""
+        """callback(failsafe_count, switched_path, screenshot_bytes,
+        triggered_sell) — fired every time record_fishing_failsafe() runs,
+        e.g. so the UI can send a webhook alert without fishing.py needing
+        to know about webhooks."""
         self.failsafe_callback = callback
 
+    def request_startup_sell(self):
+        """Marks that the next server this bot joins should sell off any
+        existing inventory before fishing — meant to be called once, when
+        the user presses the macro's own Start button. This is a one-shot
+        flag: has_done_initial_pathing (which drives whether the "walk to
+        spot" routine runs at all) resets on every server join, but this
+        flag does not, so only that first join sells; every later join in
+        the same run just walks to the spot as usual."""
+        self.needs_startup_sell = True
+
+    def set_biome_fishing_enabled(self, enabled):
+        """Called by the Discord scanner once a biome is confirmed (or
+        changes), based on that biome's "Fish This Biome" setting. When
+        False, the bot stops casting/fishing entirely for as long as this
+        biome stays active and just sits at the spot doing periodic
+        anti-AFK key presses instead — see _idle_while_not_fishing()."""
+        enabled = bool(enabled)
+        if enabled == self.fishing_enabled:
+            return
+        self.fishing_enabled = enabled
+        self._last_anti_afk_press = None  # start a fresh interval whenever this changes
+        print(f"[Fishing Bot] Fishing {'enabled' if enabled else 'disabled'} for the current biome.")
+
+    def set_anti_afk_interval(self, seconds):
+        """Sets how often (in seconds) the anti-AFK key press fires while
+        fishing is disabled for the current biome."""
+        try:
+            self.anti_afk_interval = max(1, int(seconds))
+        except (TypeError, ValueError):
+            pass
+
+    def _idle_while_not_fishing(self):
+        """Runs while fishing is disabled for the currently confirmed biome.
+        Sits in place doing nothing except, once every anti_afk_interval
+        seconds, focusing the Roblox window and tapping the anti-AFK key so
+        a long fishing-free stretch doesn't get kicked for inactivity.
+        Stays in this single call (rather than returning control to the
+        outer fishing loop every tick, which would re-focus the window far
+        more often than intended) until fishing is re-enabled or the
+        session ends."""
+        print("[Fishing Bot] Fishing disabled for this biome — sitting idle with anti-AFK enabled.")
+        while self._cycle_active() and not self.fishing_enabled:
+            now = time.time()
+            if self._last_anti_afk_press is None or now - self._last_anti_afk_press >= self.anti_afk_interval:
+                self.focus_roblox()
+                pydirectinput.press('space')
+                self._last_anti_afk_press = time.time()
+                print("[Fishing Bot] Anti-AFK key press sent.")
+            self._interruptible_sleep(1.0)
+
+    # Screenshot compression settings. JPEG at this quality is dramatically
+    # smaller than a raw PNG for a screen capture, and 1600px wide is still
+    # plenty readable for a Discord embed while keeping high-res (1440p/4K,
+    # multi-monitor) captures from ballooning in size.
+    SCREENSHOT_JPEG_QUALITY = 70
+    SCREENSHOT_MAX_WIDTH = 1600
+
     def capture_screenshot(self):
-        """Grabs a full-screen screenshot and returns it as PNG bytes, or None
-        on failure. Generic helper — used for the join screenshot as well as
-        any other on-demand screenshot (e.g. a delayed biome check-in shot)."""
+        """Grabs a full-screen screenshot, downscales it if it's very large,
+        and returns it as compressed JPEG bytes (or None on failure).
+        Generic helper — used for the join screenshot as well as any other
+        on-demand screenshot (e.g. a delayed biome check-in shot)."""
         try:
             screenshot = ImageGrab.grab()
+            if screenshot.mode != "RGB":
+                screenshot = screenshot.convert("RGB")
+
+            if screenshot.width > self.SCREENSHOT_MAX_WIDTH:
+                scale = self.SCREENSHOT_MAX_WIDTH / screenshot.width
+                new_size = (self.SCREENSHOT_MAX_WIDTH, max(1, int(screenshot.height * scale)))
+                screenshot = screenshot.resize(new_size, Image.LANCZOS)
+
             buffer = io.BytesIO()
-            screenshot.save(buffer, format="PNG")
+            screenshot.save(buffer, format="JPEG", quality=self.SCREENSHOT_JPEG_QUALITY, optimize=True)
             return buffer.getvalue()
         except Exception as e:
             print(f"[Fishing Bot] Failed to capture screenshot: {e}")
@@ -437,10 +510,27 @@ class FishSolBot:
         self.consecutive_failsafes = 0
         self._apply_active_path()
 
+    def prepare_for_server_join(self):
+        """Resets per-join state so the bot treats this as a brand-new
+        server: waits for the in-game Start button again, and walks to the
+        fishing spot fresh (has_done_initial_pathing back to False, which is
+        also what makes the sell-on-start behavior — see
+        request_startup_sell() — eligible to run again if the flag is
+        still pending)."""
+        self.is_waiting_for_start_button = True
+        self.has_done_initial_pathing = False
+
+    # How many consecutive no-bite failsafes (regardless of any path
+    # switches in between) trigger a full sell-and-restart recovery, on the
+    # theory that something's more fundamentally stuck than a bad path.
+    FAILSAFE_SELL_THRESHOLD = 5
+
     def record_fishing_failsafe(self):
         self.consecutive_failsafes += 1
+        self.total_consecutive_failsafes += 1
         failsafe_count = self.consecutive_failsafes
-        print(f"[Fishing Bot] Failsafe {failsafe_count}/2 on the current server.")
+        print(f"[Fishing Bot] Failsafe {failsafe_count}/2 on the current server "
+              f"({self.total_consecutive_failsafes} in a row overall).")
 
         screenshot_bytes = self.capture_screenshot()
         switched_path = False
@@ -452,13 +542,24 @@ class FishSolBot:
             switched_path = True
             print("[Fishing Bot] Two consecutive failsafes: switched to the next path profile.")
 
+        triggered_sell = False
+        if self.total_consecutive_failsafes >= self.FAILSAFE_SELL_THRESHOLD:
+            triggered_sell = True
+            self.consecutive_failsafes = 0
+            self.total_consecutive_failsafes = 0
+            print(f"[Fishing Bot] {self.FAILSAFE_SELL_THRESHOLD} failsafes in a row — "
+                  "selling off inventory and restarting the fishing cycle.")
+
         if self.failsafe_callback:
-            self.failsafe_callback(failsafe_count, switched_path, screenshot_bytes)
+            self.failsafe_callback(failsafe_count, switched_path, screenshot_bytes, triggered_sell)
+
+        return triggered_sell
 
     def record_successful_catch(self):
-        if self.consecutive_failsafes:
-            print("[Fishing Bot] Catch succeeded; clearing path failsafe count.")
+        if self.consecutive_failsafes or self.total_consecutive_failsafes:
+            print("[Fishing Bot] Catch succeeded; clearing failsafe counts.")
         self.consecutive_failsafes = 0
+        self.total_consecutive_failsafes = 0
 
     def reset_character(self):
         if not self._cycle_active():
@@ -694,8 +795,8 @@ class FishSolBot:
                 self.is_waiting_for_start_button = False
                 return
 
-            print("[Fishing Bot] Waiting 10 seconds for Roblox to load before checking for Start button...")
-            for _ in range(20):
+            print(f"[Fishing Bot] Waiting {WAIT_FOR_START_BUTTON_TIME} seconds for Roblox to load before checking for Start button...")
+            for _ in range(WAIT_FOR_START_BUTTON_TIME * 2):  # Total time, checking every 0.5s
                 if not self._cycle_active(): return
                 time.sleep(0.5)
 
@@ -747,15 +848,34 @@ class FishSolBot:
             self.has_done_initial_pathing = False
             return
 
-        # 0B. Initial Pathing
-        if not self.has_done_initial_pathing:
-            print("Detected first run! Selling out any leftover inventory before heading to the fishing spot...")
-            self.do_pathing_routine(do_sell=True)
-            if self._cycle_active():
-                self.has_done_initial_pathing = True
+        # 0B. Fishing Toggle — checked before any pathing happens. If
+        # fishing is disabled for the currently expected/confirmed biome,
+        # skip walking to the merchant/spot entirely and just sit right
+        # here (wherever that is — spawn, if no pathing has happened yet)
+        # with periodic anti-AFK presses. has_done_initial_pathing stays
+        # False the whole time this is skipped, so the moment fishing gets
+        # enabled again (a corrected biome confirmation, or a biome-to-biome
+        # transition into an enabled biome) the walk-to-spot step below
+        # still runs normally, just later than usual.
+        if not self.fishing_enabled:
+            self._idle_while_not_fishing()
             return
 
-        # 0C. Auto-Sell Trigger
+        # 0C. Initial Pathing
+        if not self.has_done_initial_pathing:
+            do_sell = self.needs_startup_sell
+            if do_sell:
+                print("Detected first run! Selling out any leftover inventory before heading to the fishing spot...")
+            else:
+                print("Detected first run! Walking to fishing spot...")
+            self.do_pathing_routine(do_sell=do_sell)
+            if self._cycle_active():
+                self.has_done_initial_pathing = True
+                if do_sell:
+                    self.needs_startup_sell = False
+            return
+
+        # 0D. Auto-Sell Trigger
         if self.catch_count >= self.max_catches:
             self.do_pathing_routine(do_sell=True)
             return
@@ -808,8 +928,18 @@ class FishSolBot:
             pydirectinput.mouseUp()
             time.sleep(0.5)
             print("Fishing timeout or no bite detected. Retrying recovery pathing...")
-            self.record_fishing_failsafe()
-            self.do_pathing_routine(do_sell=False)
+
+            # Press start button in case it failed to press at the start
+            pydirectinput.moveTo(self.START_BUTTON_POS[0], self.START_BUTTON_POS[1] - 20)
+            time.sleep(0.1)
+            pydirectinput.moveTo(*self.START_BUTTON_POS, duration=0.2)
+            time.sleep(0.1)
+            pydirectinput.mouseDown()
+            time.sleep(0.05)
+            pydirectinput.mouseUp()
+
+            should_sell = self.record_fishing_failsafe()
+            self.do_pathing_routine(do_sell=should_sell)
             return
 
         # 3. Mini-game (Reverted to clicks, keeping ImageGrab + CPU sleep)
@@ -871,9 +1001,11 @@ class FishSolBot:
             else:
                 time.sleep(0.1)
 
-    def toggle_on(self):
+    def toggle_on(self, reset_initial_pathing=True):
         print("[System] Bot Started")
         self.is_running = True
+        if reset_initial_pathing:
+            self.has_done_initial_pathing = False
 
     def toggle_off(self):
         print("[System] Bot Paused")
@@ -883,6 +1015,10 @@ class FishSolBot:
         # join (or a resumed pause) should never end up attaching a stale
         # screenshot to the wrong server's "Joined" embed.
         self.last_join_screenshot = None
+        # A fresh session should default to fishing until the scanner
+        # confirms a biome that says otherwise.
+        self.fishing_enabled = True
+        self._last_anti_afk_press = None
         pydirectinput.keyUp('w')
         pydirectinput.keyUp('a')
         pydirectinput.keyUp('s')
