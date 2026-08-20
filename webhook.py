@@ -135,6 +135,13 @@ class Webhook:
 
         self._send(embed, files=files)
 
+    def send_item_purchased(self, item_name, quantity):
+        self._send({
+            "title": "Item Purchased",
+            "description": f"Bought {quantity}x {item_name}.",
+            "color": discord.Color.gold().value,
+        })
+
     def send_biome_ended(self, biome, duration_seconds=None):
         embed = {
             "title": f"Biome Ended: {biome}",

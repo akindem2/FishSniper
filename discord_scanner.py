@@ -240,6 +240,23 @@ def parse_log_timestamp(ts):
     return None
 
 
+def format_biome_duration(total_seconds):
+    """Formats a duration as D:HH:MM:SS, only including the larger units
+    once they're actually needed — 'MM:SS' under an hour, 'H:MM:SS' under
+    a day, 'D:HH:MM:SS' once it reaches multiple days (and beyond, since
+    days keeps growing unbounded for long-running totals)."""
+    total_seconds = max(0, int(total_seconds))
+    days, remainder = divmod(total_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    if days > 0:
+        return f"{days}:{hours:02d}:{minutes:02d}:{seconds:02d}"
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+
 def seconds_since(ts):
     log_time = parse_log_timestamp(ts)
     if log_time is None:
@@ -553,12 +570,12 @@ def _launch_deeplink(place_id: str, link_code: str):
     """
     Last-resort deep link launcher. Works if Roblox is installed and
     registered as a URL handler. Uses the modern
-    roblox://experiences/start?placeId=...&privateServerLinkCode=... scheme
+    roblox://experiences/start?placeId=...&linkCode=... scheme
     — the older roblox://placeID=...&linkCode=... form isn't reliably
     recognized by current Roblox clients, which was silently breaking
     private-server launches every time this fallback got used.
     """
-    url = f"roblox://experiences/start?placeId={place_id}&privateServerLinkCode={link_code}"
+    url = f"roblox://experiences/start?placeId={place_id}&linkCode={link_code}"
     print(f"[Roblox Launcher] Launching via deep link: {url}")
     os.startfile(url)
     return True
@@ -677,7 +694,7 @@ def resolve_and_launch_with_cookie(raw_url, cookie):
 
     # If we only have a share code, resolve it via Roblox API
     if share_code and (not place_id or not link_code):
-        print(f"[Roblox Launcher] Detected Share Code: {share_code}. Resolving via Roblox API...")
+        print(f"[Roblox Launcher] Detected Share Code: {share_code}.")
         r_place, r_link = _resolve_share_code(share_code)
         if r_place and r_link:
             place_id, link_code = r_place, r_link
@@ -810,6 +827,19 @@ class Scanner(discord.Client):
         self.fishing_enabled_biomes = {}  # {normalized_biome_name: bool}; missing entries default to enabled
         self.log_watchdog_thread = None
         self.log_watchdog_stop = None
+
+        # Time-in-biome tracking. Runs continuously for the whole time the
+        # bot is actively in a server, independent of which biome is the
+        # current Discord target — so time spent waiting in a non-target
+        # biome between announcements still counts. Totals persist and
+        # accumulate indefinitely (never reset on their own); only an
+        # explicit reset_biome_time_totals() call clears them.
+        self.biome_time_totals = {}  # {biome_title: total_seconds (float)}
+        self._biome_time_current = None  # biome title currently being timed, or None
+        self._biome_time_started_at = None  # aware datetime when current timing segment began
+        self.biome_time_thread = None
+        self.biome_time_stop = None
+        self.biome_time_updated_callback = None  # callback(biome_title, new_total_seconds)
 
     def biome_priority_level(self, biome_name):
         """
@@ -1320,6 +1350,143 @@ class Scanner(discord.Client):
         if self.ui_reference:
             self.ui_reference.update_status("Reconnecting to a public server...")
 
+    # ------------------------------------------------------------------
+    # Time-in-biome tracking — a second continuous, independent thread
+    # (same "runs the whole time the bot is on" shape as the log watchdog
+    # above) that tails the current log for ANY biome appearing in it, not
+    # just the current Discord target, so waiting time in a non-target
+    # biome between announcements still counts. It's kept as its own
+    # thread rather than merged into the watchdog to avoid touching that
+    # thread's already-correct staleness logic.
+    # ------------------------------------------------------------------
+
+    BIOME_TIME_POLL_INTERVAL = 1.0
+
+    def set_biome_time_updated_callback(self, callback):
+        """callback(biome_title, new_total_seconds) — fired every time a
+        timing segment for a biome is committed to its running total."""
+        self.biome_time_updated_callback = callback
+
+    def _start_biome_time_tracker(self):
+        self.biome_time_stop = threading.Event()
+        self.biome_time_thread = threading.Thread(
+            target=self._biome_time_tracker_loop, args=(self.biome_time_stop,), daemon=True,
+        )
+        self.biome_time_thread.start()
+
+    def _biome_time_tracker_loop(self, stop_event):
+        log_path = None
+        last_pos = 0
+
+        while self.is_running and not stop_event.is_set():
+            if stop_event.wait(self.BIOME_TIME_POLL_INTERVAL):
+                break
+            if not self.is_running:
+                break
+
+            if not self.fish_loop or not self.fish_loop.is_running:
+                # Not actively in a server (or the session just ended) —
+                # close out whatever was being timed. Usually already
+                # closed via the session_end_callback by this point; this
+                # is just a safety net (a no-op if so).
+                self._close_biome_time_segment()
+                log_path = None
+                last_pos = 0
+                continue
+
+            try:
+                if log_path is None:
+                    candidate = identify_roblox_log(self.roblox_cookie)
+                    if not candidate:
+                        continue
+                    log_path = candidate
+                    # Start tailing from the current end rather than
+                    # replaying the whole file — biome lines only start
+                    # appearing once actually in-game post-Start-button
+                    # anyway, so this naturally only picks up lines from
+                    # this point forward.
+                    last_pos = os.path.getsize(log_path)
+                    continue
+
+                current_size = os.path.getsize(log_path)
+
+                if current_size < last_pos:
+                    # Log rotated/truncated — re-identify and resume from
+                    # the end of whatever log is current now.
+                    candidate = identify_roblox_log(self.roblox_cookie)
+                    log_path = candidate
+                    last_pos = os.path.getsize(log_path) if log_path else 0
+                    continue
+
+                if current_size > last_pos:
+                    with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                        f.seek(last_pos)
+                        new_data = f.read(current_size - last_pos)
+                    last_pos = current_size
+                    self._process_biome_time_lines(new_data)
+
+            except Exception as e:
+                print(f"[Biome Timer] Error while tailing log: {e}")
+
+        self._close_biome_time_segment()
+
+    def _process_biome_time_lines(self, data):
+        """Scans a batch of newly-read log text for biome RPC lines in
+        order, closing out and starting timing segments for each
+        transition found — so several biome changes within one poll
+        interval are all accounted for individually using their own log
+        timestamps, rather than only the last one being noticed."""
+        for line in data.splitlines():
+            detected_title = detect_biome_from_rpc_line(line)
+            if not detected_title or detected_title == self._biome_time_current:
+                continue
+
+            line_timestamp = parse_log_timestamp(line.split(",", 1)[0].strip())
+            event_time = line_timestamp or datetime.now(timezone.utc)
+
+            self._close_biome_time_segment(end_time=event_time)
+            self._biome_time_current = detected_title
+            self._biome_time_started_at = event_time
+
+    def _close_biome_time_segment(self, end_time=None):
+        """Commits the elapsed time for whichever biome is currently being
+        timed (if any) into its running total, and clears the in-progress
+        timer. Safe to call even when nothing is in progress (no-op)."""
+        if self._biome_time_current is None or self._biome_time_started_at is None:
+            return
+
+        end_time = end_time or datetime.now(timezone.utc)
+        elapsed = (end_time - self._biome_time_started_at).total_seconds()
+        biome = self._biome_time_current
+        self._biome_time_current = None
+        self._biome_time_started_at = None
+
+        if elapsed <= 0:
+            return
+
+        new_total = self.biome_time_totals.get(biome, 0.0) + elapsed
+        self.biome_time_totals[biome] = new_total
+        print(f"[Biome Timer] +{format_biome_duration(elapsed)} to {biome} "
+              f"(total: {format_biome_duration(new_total)}).")
+        if self.biome_time_updated_callback:
+            self.biome_time_updated_callback(biome, new_total)
+
+    def handle_fish_loop_session_ending(self):
+        """Called by fish_loop right when a server session is ending — any
+        toggle_off, whether that's a join transition, a disconnect, a
+        priority interrupt, or a full manual stop — so time-in-biome
+        tracking closes out whatever was in progress immediately instead
+        of waiting for the tracker thread's next poll."""
+        self._close_biome_time_segment()
+
+    def reset_biome_time_totals(self):
+        """Clears all recorded time-in-biome totals. Does not interrupt
+        any timing segment currently in progress — it just zeroes the
+        ledger, so an active segment's next commit starts a fresh total
+        for that biome rather than being lost."""
+        self.biome_time_totals = {}
+        print("[Biome Timer] All biome time totals have been reset.")
+
     def _finish_biome_session(self, biome, reason, observed_biome=None, detail=None):
         with self.log_monitor_lock:
             if self.active_biome_session != biome:
@@ -1394,6 +1561,7 @@ class Scanner(discord.Client):
         self.active_biome_session = None
         self.log_biome_confirmed = False
         self._start_log_watchdog()
+        self._start_biome_time_tracker()
         if self.ui_reference:
             self.ui_reference.update_status("Scanning for biomes...")
 
@@ -1405,6 +1573,9 @@ class Scanner(discord.Client):
         self.log_monitor_stop.set()
         if self.log_watchdog_stop:
             self.log_watchdog_stop.set()
+        if self.biome_time_stop:
+            self.biome_time_stop.set()
+        self._close_biome_time_segment()
 
     def start_scanner(self):
         """Start the Discord scanner"""

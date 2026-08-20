@@ -3,9 +3,11 @@ import threading
 import json
 import io
 import requests
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from PIL import Image
 import fishing
-from discord_scanner import scanner, biome_thumbnail_url
+from discord_scanner import scanner, biome_thumbnail_url, format_biome_duration
 import os
 from pathlib import Path
 import sys
@@ -19,6 +21,20 @@ except Exception as e:
 
 DEFAULT_START_HOTKEY = "f1"
 DEFAULT_STOP_HOTKEY = "f2"
+
+# Mirrors fishing.py's restock boundary logic, kept separate so the UI can
+# compute "bought today" status for display without reaching into fish_loop
+# internals.
+SHOP_RESTOCK_HOUR_ET = 20
+SHOP_RESTOCK_TZ = ZoneInfo("America/New_York")
+
+
+def current_shop_restock_boundary():
+    now_et = datetime.now(SHOP_RESTOCK_TZ)
+    boundary = now_et.replace(hour=SHOP_RESTOCK_HOUR_ET, minute=0, second=0, microsecond=0)
+    if now_et < boundary:
+        boundary -= timedelta(days=1)
+    return boundary
 
 # ---------------------------------------------------------------------------
 # Theme
@@ -509,6 +525,9 @@ class FishSniperUI(ctk.CTk):
         scanner.fish_loop = fish_loop
         fish_loop.set_path_change_callback(self._on_active_path_changed)
         fish_loop.set_failsafe_callback(self._on_fishing_failsafe)
+        fish_loop.set_buy_callback(self._on_item_purchased)
+        fish_loop.set_session_end_callback(scanner.handle_fish_loop_session_ending)
+        scanner.set_biome_time_updated_callback(self._on_biome_time_updated)
 
         # Configure Grid Layout
         self.grid_columnconfigure(1, weight=1)
@@ -608,12 +627,14 @@ class FishSniperUI(ctk.CTk):
         self.tab_biomes = self.tabview.add("🌍 Biomes")
         self.tab_priority = self.tabview.add("🏆 Priority")
         self.tab_servers = self.tabview.add("💬 Servers")
+        self.tab_shop = self.tabview.add("🛒 Shop")
 
         self._build_dashboard_tab()
         self._build_settings_tab()
         self._build_biomes_tab()
         self._build_priority_tab()
         self._build_servers_tab()
+        self._build_shop_tab()
 
         # Thumbnails are fetched over the network, so load them in the
         # background and swap them in once each one lands rather than
@@ -802,8 +823,17 @@ class FishSniperUI(ctk.CTk):
         self.tab_biomes.grid_columnconfigure(0, weight=1)
         self.tab_biomes.grid_rowconfigure(1, weight=1)
 
-        ctk.CTkLabel(self.tab_biomes, text="Select Biomes to Hunt", font=self.heading_font,
-                     text_color=THEME["text"]).grid(row=0, column=0, padx=4, pady=(6, 10), sticky="w")
+        header_row = ctk.CTkFrame(self.tab_biomes, fg_color="transparent")
+        header_row.grid(row=0, column=0, padx=4, pady=(6, 10), sticky="ew")
+        header_row.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(header_row, text="Select Biomes to Hunt", font=self.heading_font,
+                     text_color=THEME["text"]).grid(row=0, column=0, sticky="w")
+
+        reset_time_btn = ctk.CTkButton(header_row, text="Reset All Biome Times", width=170, height=28,
+                                        font=self.small_font, fg_color=THEME["danger"],
+                                        hover_color=THEME["danger_hover"], command=self.reset_all_biome_times)
+        reset_time_btn.grid(row=0, column=1, sticky="e")
 
         self.scroll_biomes = ctk.CTkScrollableFrame(self.tab_biomes, fg_color="transparent")
         self.scroll_biomes.grid(row=1, column=0, padx=2, pady=(0, 10), sticky="nsew")
@@ -818,6 +848,7 @@ class FishSniperUI(ctk.CTk):
         self.checkin_flaps = {}
         self.checkin_expand_btns = {}
         self.checkin_flap_expanded = {}
+        self.biome_time_labels = {}
         for i, biome in enumerate(BIOMES):
             row, col = divmod(i, 3)
             card = ctk.CTkFrame(self.scroll_biomes, fg_color=THEME["card"], corner_radius=10,
@@ -896,6 +927,14 @@ class FishSniperUI(ctk.CTk):
                 font=self.small_font, text_color=THEME["text_faint"], wraplength=190, justify="left",
             ).pack(anchor="w", padx=10, pady=(0, 8))
 
+            divider2 = ctk.CTkFrame(flap, fg_color=THEME["card_border"], height=1)
+            divider2.pack(fill="x", padx=10, pady=(0, 8))
+
+            time_label = ctk.CTkLabel(flap, text="Time in Biome: 0:00", font=self.small_font,
+                                       text_color=THEME["text_dim"])
+            time_label.pack(anchor="w", padx=10, pady=(0, 10))
+            self.biome_time_labels[biome] = time_label
+
     def toggle_checkin_flap(self, biome):
         """Expands or collapses the check-in screenshot flap under a biome card."""
         flap = self.checkin_flaps[biome]
@@ -921,6 +960,43 @@ class FishSniperUI(ctk.CTk):
 
     def get_fishing_enabled_settings(self):
         return {biome: (switch.get() == 1) for biome, switch in self.fish_switches.items()}
+
+    def refresh_biome_time_labels(self):
+        """Updates every biome's "Time in Biome" label from the scanner's
+        recorded totals. Deliberately not a live-ticking display — per
+        design, a biome's displayed time only advances once that timing
+        segment actually ends and gets committed."""
+        for biome, label in self.biome_time_labels.items():
+            total_seconds = scanner.biome_time_totals.get(biome, 0)
+            label.configure(text=f"Time in Biome: {format_biome_duration(total_seconds)}")
+
+    def _on_biome_time_updated(self, biome, new_total_seconds):
+        """Received from the Discord scanner's background tracker thread
+        whenever a time-in-biome segment commits. Marshals onto the main
+        thread to update the label and persist immediately, so accumulated
+        time survives even if the app closes uncleanly."""
+        def handle():
+            label = self.biome_time_labels.get(biome)
+            if label:
+                label.configure(text=f"Time in Biome: {format_biome_duration(new_total_seconds)}")
+            self.save_settings()
+
+        self.after(0, handle)
+
+    def reset_all_biome_times(self):
+        """Resets every biome's recorded time back to zero, after an
+        explicit confirmation — this can't be undone, so a stray click
+        shouldn't be able to wipe out accumulated time."""
+        confirmed = messagebox.askyesno(
+            "Reset Biome Times",
+            "This will permanently reset the recorded time for every biome back to zero.\n\n"
+            "This cannot be undone. Continue?",
+        )
+        if not confirmed:
+            return
+        scanner.reset_biome_time_totals()
+        self.refresh_biome_time_labels()
+        self.save_settings()
 
     def _build_priority_tab(self):
         self.tab_priority.grid_columnconfigure(0, weight=1)
@@ -954,6 +1030,134 @@ class FishSniperUI(ctk.CTk):
 
         # Add initial entry
         self.add_guild_entry()
+
+    def _build_shop_tab(self):
+        self.tab_shop.grid_columnconfigure(0, weight=1)
+        self.tab_shop.grid_rowconfigure(2, weight=1)
+
+        header_row = ctk.CTkFrame(self.tab_shop, fg_color="transparent")
+        header_row.grid(row=0, column=0, padx=4, pady=(6, 4), sticky="ew")
+        header_row.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(header_row, text="Auto-Buy", font=self.heading_font,
+                     text_color=THEME["text"]).grid(row=0, column=0, sticky="w")
+
+        self.buy_master_switch = ctk.CTkSwitch(header_row, text="Enable Auto-Buy", font=self.normal_font,
+                                                progress_color=THEME["accent"], text_color=THEME["text"])
+        self.buy_master_switch.grid(row=0, column=1, sticky="e")
+
+        ctk.CTkLabel(
+            self.tab_shop,
+            text="Runs right after any sell loop, while the merchant is still open — nothing runs at "
+                 "all if no enabled item is due. The shop restocks daily at 8 PM ET; an item already "
+                 "bought since the last restock won't be bought again until the next one.",
+            font=self.small_font, text_color=THEME["text_dim"], wraplength=700, justify="left",
+        ).grid(row=1, column=0, padx=4, pady=(0, 10), sticky="w")
+
+        self.scroll_shop = ctk.CTkScrollableFrame(self.tab_shop, fg_color="transparent")
+        self.scroll_shop.grid(row=2, column=0, padx=2, pady=(0, 10), sticky="nsew")
+        for col in range(3):
+            self.scroll_shop.grid_columnconfigure(col, weight=1)
+
+        self.buy_switches = {}
+        self.buy_qty_entries = {}
+        self.buy_status_labels = {}
+
+        for i, item in enumerate(fishing.BUY_ITEMS):
+            row, col = divmod(i, 3)
+            name = item["name"]
+            max_qty = item["max_qty"]
+
+            card = ctk.CTkFrame(self.scroll_shop, fg_color=THEME["card"], corner_radius=10,
+                                 border_width=1, border_color=THEME["card_border"])
+            card.grid(row=row, column=col, padx=6, pady=6, sticky="ew")
+
+            switch = ctk.CTkSwitch(card, text=name, font=self.normal_font,
+                                    progress_color=THEME["accent"], text_color=THEME["text"])
+            switch.pack(anchor="w", padx=12, pady=(10, 6), fill="x")
+            self.buy_switches[name] = switch
+
+            qty_row = ctk.CTkFrame(card, fg_color="transparent")
+            qty_row.pack(anchor="w", padx=12, pady=(0, 6), fill="x")
+            ctk.CTkLabel(qty_row, text=f"Qty (max {max_qty}):", font=self.small_font,
+                         text_color=THEME["text_dim"]).pack(side="left")
+            qty_entry = ctk.CTkEntry(qty_row, width=70, height=26, font=self.small_font,
+                                      fg_color=THEME["bg_alt"], border_color=THEME["card_border"])
+            qty_entry.insert(0, "0")
+            qty_entry.pack(side="left", padx=(6, 0))
+            qty_entry.bind("<FocusOut>", lambda e, n=name, m=max_qty: self._clamp_buy_quantity(n, m))
+            qty_entry.bind("<Return>", lambda e, n=name, m=max_qty: self._clamp_buy_quantity(n, m))
+            self.buy_qty_entries[name] = qty_entry
+
+            status_label = ctk.CTkLabel(card, text="Not bought yet", font=self.small_font,
+                                         text_color=THEME["text_faint"])
+            status_label.pack(anchor="w", padx=12, pady=(0, 10))
+            self.buy_status_labels[name] = status_label
+
+        self.refresh_buy_status_labels()
+
+    def _clamp_buy_quantity(self, item_name, max_qty):
+        entry = self.buy_qty_entries.get(item_name)
+        if not entry:
+            return
+        try:
+            value = int(entry.get().strip() or "0")
+        except ValueError:
+            value = 0
+        value = max(0, min(value, max_qty))
+        entry.delete(0, 'end')
+        entry.insert(0, str(value))
+
+    def get_buy_settings(self):
+        """Returns (master_enabled, item_settings) where item_settings is
+        {item_name: {"enabled": bool, "quantity": int}}."""
+        item_settings = {}
+        for item in fishing.BUY_ITEMS:
+            name = item["name"]
+            switch = self.buy_switches.get(name)
+            entry = self.buy_qty_entries.get(name)
+            try:
+                qty = int((entry.get() if entry else "0").strip() or 0)
+            except ValueError:
+                qty = 0
+            qty = max(0, min(qty, item["max_qty"]))
+            item_settings[name] = {"enabled": switch.get() == 1 if switch else False, "quantity": qty}
+        master_enabled = self.buy_master_switch.get() == 1
+        return master_enabled, item_settings
+
+    def refresh_buy_status_labels(self):
+        """Recomputes each item's "bought today" status label from
+        fish_loop's recorded purchase timestamps against the current
+        restock boundary."""
+        boundary = current_shop_restock_boundary()
+        for name, label in self.buy_status_labels.items():
+            last = fish_loop.last_purchased.get(name)
+            if last is not None and last >= boundary:
+                stamp = last.astimezone(SHOP_RESTOCK_TZ).strftime("%I:%M %p").lstrip("0")
+                label.configure(text=f"Bought today ({stamp} ET)", text_color=THEME["success"])
+            else:
+                label.configure(text="Not bought yet", text_color=THEME["text_faint"])
+
+    def _on_item_purchased(self, item_name, quantity):
+        """Received from the fishing thread after a successful purchase.
+        Marshals onto the main thread to update the status label and
+        safely read the webhook URL, then sends the alert on its own
+        background thread so the network call blocks neither the UI nor
+        the fishing loop."""
+        def handle():
+            self.refresh_buy_status_labels()
+
+            webhook_url = self.ds_webhook_entry.get().strip()
+            if not webhook_url or not webhook_url.startswith("http"):
+                return
+
+            def send():
+                from webhook import Webhook
+                Webhook(webhook_url).send_item_purchased(item_name, quantity)
+
+            threading.Thread(target=send, daemon=True).start()
+
+        self.after(0, handle)
 
     # ------------------------------------------------------------------
     # Behavior
@@ -1298,6 +1502,52 @@ class FishSniperUI(ctk.CTk):
             self.stop_hotkey_entry.insert(0, settings.get('stop_hotkey', DEFAULT_STOP_HOTKEY))
             self.apply_hotkeys()
 
+            # Load auto-buy settings
+            if settings.get('buy_master_enabled', False):
+                self.buy_master_switch.select()
+            else:
+                self.buy_master_switch.deselect()
+
+            saved_buy_items = settings.get('buy_item_settings', {})
+            for item in fishing.BUY_ITEMS:
+                name = item["name"]
+                saved = saved_buy_items.get(name, {})
+                switch = self.buy_switches.get(name)
+                entry = self.buy_qty_entries.get(name)
+                if switch is not None:
+                    if saved.get("enabled"):
+                        switch.select()
+                    else:
+                        switch.deselect()
+                if entry is not None:
+                    qty = max(0, min(int(saved.get("quantity", 0) or 0), item["max_qty"]))
+                    entry.delete(0, 'end')
+                    entry.insert(0, str(qty))
+
+            # Purchase timestamps were persisted as ISO strings — parse
+            # back into timezone-aware datetimes so restock comparisons
+            # work correctly. Any entry that fails to parse is skipped
+            # rather than crashing the whole settings load.
+            last_purchased = {}
+            for name, iso_str in settings.get('last_purchased', {}).items():
+                try:
+                    last_purchased[name] = datetime.fromisoformat(iso_str)
+                except (TypeError, ValueError):
+                    continue
+            fish_loop.set_last_purchased(last_purchased)
+
+            buy_master_enabled, buy_item_settings = self.get_buy_settings()
+            fish_loop.set_buy_settings(buy_master_enabled, buy_item_settings)
+            self.refresh_buy_status_labels()
+
+            # Restore accumulated time-in-biome totals (values are already
+            # plain seconds, JSON-serializable as-is — no parsing needed).
+            saved_biome_times = settings.get('biome_time_totals', {})
+            scanner.biome_time_totals = {
+                biome: float(seconds) for biome, seconds in saved_biome_times.items()
+            }
+            self.refresh_biome_time_labels()
+
             # Load selected biomes
             if 'selected_biomes' in settings:
                 for biome in BIOMES:
@@ -1444,6 +1694,9 @@ class FishSniperUI(ctk.CTk):
         fish_loop.set_anti_afk_interval(anti_afk_interval)
         self.apply_hotkeys()
 
+        buy_master_enabled, buy_item_settings = self.get_buy_settings()
+        fish_loop.set_buy_settings(buy_master_enabled, buy_item_settings)
+
         # Gather chosen biomes
         selected_biomes = self.get_enabled_biomes()
 
@@ -1460,6 +1713,13 @@ class FishSniperUI(ctk.CTk):
                                biome_priority_levels, discord_ping_user_id=ping_user_id,
                                checkin_screenshots=checkin_screenshots,
                                fishing_enabled_biomes=fishing_enabled_biomes)
+
+        # datetime objects in last_purchased aren't JSON-serializable, so
+        # persist them as ISO-format strings (timezone-aware, round-trips
+        # cleanly through datetime.fromisoformat on load).
+        last_purchased_serialized = {
+            name: dt.isoformat() for name, dt in fish_loop.last_purchased.items()
+        }
 
         # Save settings to LOCALAPPDATA
         settings_data = {
@@ -1482,6 +1742,10 @@ class FishSniperUI(ctk.CTk):
             'anti_afk_interval': anti_afk_interval,
             'start_hotkey': self.start_hotkey_entry.get().strip() or DEFAULT_START_HOTKEY,
             'stop_hotkey': self.stop_hotkey_entry.get().strip() or DEFAULT_STOP_HOTKEY,
+            'buy_master_enabled': buy_master_enabled,
+            'buy_item_settings': buy_item_settings,
+            'last_purchased': last_purchased_serialized,
+            'biome_time_totals': scanner.biome_time_totals,
         }
         save_settings_to_file(settings_data)
 

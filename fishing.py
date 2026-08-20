@@ -1,5 +1,7 @@
 import io
 import time
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import pyautogui
 import pydirectinput
 from PIL import Image, ImageGrab
@@ -13,6 +15,41 @@ try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
     pass
+
+# The in-game shop restocks daily at 8 PM US-Eastern. "Bought today" means
+# "bought since the most recent 8 PM ET" rather than calendar midnight, so
+# this uses a real timezone (handles EST/EDT automatically) rather than a
+# naive local-time comparison.
+RESTOCK_HOUR_ET = 20
+RESTOCK_TZ = ZoneInfo("America/New_York")
+
+# "Fast, one page down" scroll used before buying the items that need
+# scrolling to reach (Potion of Bound, Warp Potion, Heavenly Potion).
+BUY_SCROLL_AMOUNT = -300
+BUY_SCROLL_STEPS = 6
+
+# Master list of buyable shop items. `requires_scroll` items sit further
+# down the Buy menu and need the menu scrolled before they're clickable —
+# non-scroll items are always bought first, then the menu is scrolled once,
+# then the scroll items. `max_qty` caps what the UI will let you configure
+# as a purchase quantity for that item.
+BUY_ITEMS = [
+    {"name": "Lucky Potion", "max_qty": 1000, "requires_scroll": False},
+    {"name": "Speed Potion", "max_qty": 1000, "requires_scroll": False},
+    {"name": "Wind Essence", "max_qty": 1000, "requires_scroll": False},
+    {"name": "Icicle", "max_qty": 1000, "requires_scroll": False},
+    {"name": "Rainy Bottle", "max_qty": 1000, "requires_scroll": False},
+    {"name": "Haste Potion III", "max_qty": 1000, "requires_scroll": False},
+    {"name": "Fortune Potion III", "max_qty": 1000, "requires_scroll": False},
+    {"name": "Gladiator Potion", "max_qty": 1000, "requires_scroll": False},
+    {"name": "Eternal Flame", "max_qty": 1000, "requires_scroll": False},
+    {"name": "Corruptaine", "max_qty": 1000, "requires_scroll": False},
+    {"name": "Hour Glass", "max_qty": 1000, "requires_scroll": False},
+    {"name": "NULL?", "max_qty": 1000, "requires_scroll": False},
+    {"name": "Potion of Bound", "max_qty": 2, "requires_scroll": True},
+    {"name": "Warp Potion", "max_qty": 1, "requires_scroll": True},
+    {"name": "Heavenly Potion", "max_qty": 1, "requires_scroll": True},
+]
 
 COORDS = {
     "1080p": {
@@ -38,6 +75,19 @@ COORDS = {
         "START": {
                 "START_BUTTON_POS": (251, 1000),
         },
+        # Fill these in: OPEN_BUY_TAB is the "Buy" tab in the merchant UI.
+        # PURCHASE_BUTTON_1/AMOUNT_BOX/PURCHASE_BUTTON_2/CLOSE_ITEM_POPUP
+        # are shared across every item (they're the same popup regardless
+        # of which item you clicked). ITEMS maps each item name to its own
+        # clickable slot position in the Buy list.
+        "BUY": {
+            "OPEN_BUY_TAB": (0, 0),
+            "PURCHASE_BUTTON_1": (0, 0),
+            "AMOUNT_BOX": (0, 0),
+            "PURCHASE_BUTTON_2": (0, 0),
+            "CLOSE_ITEM_POPUP": (0, 0),
+            "ITEMS": {item["name"]: (0, 0) for item in BUY_ITEMS},
+        },
     },
     "1440p": {
         "FISHING": {
@@ -60,7 +110,15 @@ COORDS = {
         },
         "START": {
                 "START_BUTTON_POS": (410, 1340),
-        }
+        },
+        "BUY": {
+            "OPEN_BUY_TAB": (0, 0),
+            "PURCHASE_BUTTON_1": (0, 0),
+            "AMOUNT_BOX": (0, 0),
+            "PURCHASE_BUTTON_2": (0, 0),
+            "CLOSE_ITEM_POPUP": (0, 0),
+            "ITEMS": {item["name"]: (0, 0) for item in BUY_ITEMS},
+        },
     },
     "1366x768": {
         "FISHING": {
@@ -83,7 +141,15 @@ COORDS = {
         },
         "START": {
                 "START_BUTTON_POS": (221, 714)
-        }
+        },
+        "BUY": {
+            "OPEN_BUY_TAB": (0, 0),
+            "PURCHASE_BUTTON_1": (0, 0),
+            "AMOUNT_BOX": (0, 0),
+            "PURCHASE_BUTTON_2": (0, 0),
+            "CLOSE_ITEM_POPUP": (0, 0),
+            "ITEMS": {item["name"]: (0, 0) for item in BUY_ITEMS},
+        },
     }
 }
 
@@ -172,6 +238,7 @@ POST_MERCHANT_PATHS = {
             ("hold", "a", 0.7),
             ("hold", "w", 0.4),
             ("hold", "a", 0.8),
+            ("hold", "s", 0.8)
         ],
     },
 
@@ -226,9 +293,8 @@ MAX_WAIT_FOR_CAST = 35
 
 # User-configurable start button detection values.
 START_BUTTON_COLOR = (127, 255, 147)
-START_BUTTON_COLOR_TOLERANCE = 5
+START_BUTTON_COLOR_TOLERANCE = 15
 START_BUTTON_WAIT_TIMEOUT = 120
-WAIT_FOR_START_BUTTON_TIME = 15
 
 class FishSolBot:
     def __init__(self):
@@ -256,6 +322,11 @@ class FishSolBot:
         self.fishing_enabled = True  # whether to actually fish in the currently confirmed biome
         self.anti_afk_interval = 300  # seconds between anti-AFK key presses while not fishing (default 5 min)
         self._last_anti_afk_press = None
+        self.buy_enabled = False  # master auto-buy toggle
+        self.buy_item_settings = {}  # {item_name: {"enabled": bool, "quantity": int}}
+        self.last_purchased = {}  # {item_name: datetime (aware, US/Eastern) of last successful purchase}
+        self.buy_callback = None  # callback(item_name, quantity) fired after each successful purchase
+        self.session_end_callback = None  # callback() fired at the top of every toggle_off()
         
         # Initialize default variables (Replaces all the global variables)
         self.update_coordinates("1080p", "Normal")
@@ -370,6 +441,15 @@ class FishSolBot:
             self.CLOSE_MERCHANT = COORDS[resolution]["MERCHANT"]["CLOSE_MERCHANT"]
 
             self.START_BUTTON_POS = COORDS[resolution]["START"]["START_BUTTON_POS"]
+
+            buy_coords = COORDS[resolution].get("BUY", {})
+            self.BUY_OPEN_TAB = buy_coords.get("OPEN_BUY_TAB", (0, 0))
+            self.BUY_PURCHASE_BUTTON_1 = buy_coords.get("PURCHASE_BUTTON_1", (0, 0))
+            self.BUY_AMOUNT_BOX = buy_coords.get("AMOUNT_BOX", (0, 0))
+            self.BUY_PURCHASE_BUTTON_2 = buy_coords.get("PURCHASE_BUTTON_2", (0, 0))
+            self.BUY_CLOSE_ITEM_POPUP = buy_coords.get("CLOSE_ITEM_POPUP", (0, 0))
+            self.BUY_ITEM_POSITIONS = buy_coords.get("ITEMS", {})
+
             print(f"[System] Coordinates updated to {resolution}")
 
     def _set_path_profiles(self, profiles):
@@ -727,6 +807,182 @@ class FishSolBot:
             pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
             self._interruptible_sleep(1.0)
 
+    # ------------------------------------------------------------------
+    # Auto-Buy
+    # ------------------------------------------------------------------
+
+    def set_buy_settings(self, enabled, item_settings):
+        """enabled: master auto-buy toggle. item_settings: {item_name:
+        {"enabled": bool, "quantity": int}}. Quantities are clamped to each
+        item's max_qty here as a safety net, even though the UI should
+        already be enforcing that."""
+        self.buy_enabled = bool(enabled)
+        max_by_name = {item["name"]: item["max_qty"] for item in BUY_ITEMS}
+        clamped = {}
+        for name, config in (item_settings or {}).items():
+            max_qty = max_by_name.get(name)
+            if max_qty is None:
+                continue
+            try:
+                qty = int(config.get("quantity", 0))
+            except (TypeError, ValueError):
+                qty = 0
+            qty = max(0, min(qty, max_qty))
+            clamped[name] = {"enabled": bool(config.get("enabled", False)), "quantity": qty}
+        self.buy_item_settings = clamped
+
+    def set_buy_callback(self, callback):
+        """callback(item_name, quantity) — fired after each successful
+        purchase, e.g. so the UI can update a "bought today" status label
+        and send a webhook without fishing.py needing to know about either."""
+        self.buy_callback = callback
+
+    def set_session_end_callback(self, callback):
+        """callback() — fired at the very top of every toggle_off(), i.e.
+        whenever a server session is ending for any reason (join
+        transition, disconnect, priority interrupt, or a full manual
+        stop). Used by the Discord scanner to close out time-in-biome
+        tracking immediately rather than waiting for its own tracker
+        thread to notice on its next poll."""
+        self.session_end_callback = callback
+
+    def set_last_purchased(self, last_purchased):
+        """Restores previously-recorded purchase timestamps (e.g. loaded
+        from settings.json on startup), so items already bought today
+        don't get bought again just because the app restarted."""
+        self.last_purchased = dict(last_purchased or {})
+
+    def _current_restock_boundary(self):
+        """Returns the datetime (US/Eastern) of the most recent daily
+        restock (8 PM ET) that has already happened — the start of the
+        current shopping window. Anything purchased before this point no
+        longer counts as "bought today" and is eligible to be bought again."""
+        now_et = datetime.now(RESTOCK_TZ)
+        boundary = now_et.replace(hour=RESTOCK_HOUR_ET, minute=0, second=0, microsecond=0)
+        if now_et < boundary:
+            boundary -= timedelta(days=1)
+        return boundary
+
+    def _items_needing_purchase(self):
+        """Returns the BUY_ITEMS entries (with their configured quantity)
+        that are enabled, have a quantity > 0, and haven't been bought
+        since the last restock boundary."""
+        if not self.buy_enabled:
+            return []
+
+        boundary = self._current_restock_boundary()
+        needed = []
+        for item in BUY_ITEMS:
+            name = item["name"]
+            config = self.buy_item_settings.get(name)
+            if not config or not config.get("enabled"):
+                continue
+            qty = config.get("quantity", 0)
+            if qty <= 0:
+                continue
+            last = self.last_purchased.get(name)
+            if last is None or last < boundary:
+                needed.append((item, qty))
+        return needed
+
+    def buy_items_logic(self):
+        """Runs right after selling, while still at the open merchant.
+        Buys whatever enabled items haven't been purchased since the last
+        daily restock. Non-scroll items are always bought first, then the
+        menu is scrolled down once, then the items that needed scrolling
+        to reach. Does nothing at all (no clicks) if nothing is due."""
+        items_needed = self._items_needing_purchase()
+        if not items_needed:
+            return
+
+        print(f"[Auto-Buy] {len(items_needed)} item(s) due for purchase: "
+              f"{', '.join(item['name'] for item, _ in items_needed)}")
+
+        pydirectinput.moveTo(self.BUY_OPEN_TAB[0], self.BUY_OPEN_TAB[1] - 3)
+        pydirectinput.moveTo(self.BUY_OPEN_TAB[0], self.BUY_OPEN_TAB[1], duration=0.2)
+        time.sleep(0.1)
+        pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
+        self._interruptible_sleep(0.4)
+        if not self._cycle_active(): return
+
+        non_scroll_items = [(item, qty) for item, qty in items_needed if not item["requires_scroll"]]
+        scroll_items = [(item, qty) for item, qty in items_needed if item["requires_scroll"]]
+
+        for item, qty in non_scroll_items:
+            if not self._cycle_active(): return
+            self._buy_single_item(item, qty)
+
+        if scroll_items:
+            if not self._cycle_active(): return
+            print("[Auto-Buy] Scrolling down to reach the remaining items...")
+            for _ in range(BUY_SCROLL_STEPS):
+                if not self._cycle_active(): return
+                pyautogui.scroll(BUY_SCROLL_AMOUNT)
+                time.sleep(0.01)
+            self._interruptible_sleep(0.3)
+
+            for item, qty in scroll_items:
+                if not self._cycle_active(): return
+                self._buy_single_item(item, qty)
+
+        print("[Auto-Buy] Finished buying available items.")
+
+    def _buy_single_item(self, item, qty):
+        name = item["name"]
+        pos = self.BUY_ITEM_POSITIONS.get(name)
+        if not pos or pos == (0, 0):
+            print(f"[Auto-Buy] No coordinates configured for '{name}' yet — skipping.")
+            return
+
+        print(f"[Auto-Buy] Buying {qty}x {name}...")
+
+        # Click the item in the Buy list.
+        pydirectinput.moveTo(pos[0], pos[1] - 50)
+        pydirectinput.moveTo(pos[0], pos[1], duration=0.2)
+        time.sleep(0.1)
+        pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
+        self._interruptible_sleep(0.3)
+        if not self._cycle_active(): return
+
+        # First Purchase button — opens the amount/confirm popup.
+        pydirectinput.moveTo(self.BUY_PURCHASE_BUTTON_1[0], self.BUY_PURCHASE_BUTTON_1[1] - 50)
+        pydirectinput.moveTo(self.BUY_PURCHASE_BUTTON_1[0], self.BUY_PURCHASE_BUTTON_1[1], duration=0.2)
+        time.sleep(0.1)
+        pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
+        self._interruptible_sleep(0.3)
+        if not self._cycle_active(): return
+
+        # Amount box — clicking it auto-selects/overwrites the pre-filled value.
+        pydirectinput.moveTo(self.BUY_AMOUNT_BOX[0], self.BUY_AMOUNT_BOX[1] - 50)
+        pydirectinput.moveTo(self.BUY_AMOUNT_BOX[0], self.BUY_AMOUNT_BOX[1], duration=0.2)
+        time.sleep(0.1)
+        pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
+        self._interruptible_sleep(0.2)
+        if not self._cycle_active(): return
+        pydirectinput.typewrite(str(qty), interval=0.03)
+        self._interruptible_sleep(0.2)
+        if not self._cycle_active(): return
+
+        # Second/confirm Purchase button.
+        pydirectinput.moveTo(self.BUY_PURCHASE_BUTTON_2[0], self.BUY_PURCHASE_BUTTON_2[1] - 50)
+        pydirectinput.moveTo(self.BUY_PURCHASE_BUTTON_2[0], self.BUY_PURCHASE_BUTTON_2[1], duration=0.2)
+        time.sleep(0.1)
+        pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
+        self._interruptible_sleep(0.5)
+        if not self._cycle_active(): return
+
+        # Close the item's buy popup (separate from the merchant's own X).
+        pydirectinput.moveTo(self.BUY_CLOSE_ITEM_POPUP[0], self.BUY_CLOSE_ITEM_POPUP[1] - 50)
+        pydirectinput.moveTo(self.BUY_CLOSE_ITEM_POPUP[0], self.BUY_CLOSE_ITEM_POPUP[1], duration=0.2)
+        time.sleep(0.1)
+        pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
+        self._interruptible_sleep(0.3)
+
+        self.last_purchased[name] = datetime.now(RESTOCK_TZ)
+        print(f"[Auto-Buy] Bought {qty}x {name}.")
+        if self.buy_callback:
+            self.buy_callback(name, qty)
+
     def walk_back_to_spot(self):
         profile = self.path_profiles[self.active_path_index]
         print(f"[Pathing] Following {profile['name']} from merchant to fishing spot...")
@@ -773,6 +1029,8 @@ class FishSolBot:
         if do_sell:
             self.sell_fish_logic()
             if not self._cycle_active(): return
+            self.buy_items_logic()
+            if not self._cycle_active(): return
             
         self.walk_back_to_spot()
         if do_sell:
@@ -795,8 +1053,8 @@ class FishSolBot:
                 self.is_waiting_for_start_button = False
                 return
 
-            print(f"[Fishing Bot] Waiting {WAIT_FOR_START_BUTTON_TIME} seconds for Roblox to load before checking for Start button...")
-            for _ in range(WAIT_FOR_START_BUTTON_TIME * 2):  # Total time, checking every 0.5s
+            print("[Fishing Bot] Waiting 10 seconds for Roblox to load before checking for Start button...")
+            for _ in range(20):
                 if not self._cycle_active(): return
                 time.sleep(0.5)
 
@@ -928,16 +1186,6 @@ class FishSolBot:
             pydirectinput.mouseUp()
             time.sleep(0.5)
             print("Fishing timeout or no bite detected. Retrying recovery pathing...")
-
-            # Press start button in case it failed to press at the start
-            pydirectinput.moveTo(self.START_BUTTON_POS[0], self.START_BUTTON_POS[1] - 20)
-            time.sleep(0.1)
-            pydirectinput.moveTo(*self.START_BUTTON_POS, duration=0.2)
-            time.sleep(0.1)
-            pydirectinput.mouseDown()
-            time.sleep(0.05)
-            pydirectinput.mouseUp()
-
             should_sell = self.record_fishing_failsafe()
             self.do_pathing_routine(do_sell=should_sell)
             return
@@ -1009,6 +1257,8 @@ class FishSolBot:
 
     def toggle_off(self):
         print("[System] Bot Paused")
+        if self.session_end_callback:
+            self.session_end_callback()
         self.session_id += 1
         self.is_running = False
         # Clear out any screenshot from the session we're leaving — a new
