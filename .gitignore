@@ -6,3 +6,4 @@ dist/
 main.spec
 _write_test.txt
 import time.txt
+tests/

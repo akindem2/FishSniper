@@ -122,7 +122,7 @@ def extract_urls(message):
             for component in row.children:
                 if hasattr(component, "url") and component.url:
                     web_urls.append(component.url)
-    return list(dict.fromkeys(protocol_urls + web_urls))
+    return [url.strip("`") for url in dict.fromkeys(protocol_urls + web_urls)]
 
 
 def normalize_biome_name(name):
@@ -523,49 +523,6 @@ def _parse_roblox_link(raw_url: str):
     return place_id, link_code, None, None
 
 
-def _resolve_share_code(share_code: str):
-    """
-    Uses Roblox's share-links API to resolve a share code into:
-    (place_id, link_code) or (None, None) on failure.
-    """
-    try:
-        url = f"https://apis.roblox.com/share-links/v1/share-links/{share_code}"
-        res = requests.get(url, timeout=10)
-        if res.status_code != 200:
-            print(f"[Roblox Launcher] Share-links API HTTP {res.status_code}")
-            return None, None
-
-        data = res.json()
-        # Typical structure:
-        # {
-        #   "targetType": "Experience",
-        #   "targetId": 15532962292,
-        #   "linkType": "ExperienceInvite",
-        #   "data": {
-        #       "placeId": 15532962292,
-        #       "privateServerLinkCode": "XXXX-XXXX"
-        #   }
-        # }
-        target_id = data.get("targetId")
-        payload = data.get("data", {}) or {}
-        place_id = str(payload.get("placeId") or target_id or "")
-        link_code = payload.get("privateServerLinkCode") or payload.get("joinCode")
-
-        if not place_id or not link_code:
-            print("[Roblox Launcher] Share-links API returned incomplete data.")
-            return None, None
-
-        print(
-            f"[Roblox Launcher] Resolved share code {share_code} → "
-            f"placeId={place_id}, linkCode={link_code}"
-        )
-        return place_id, link_code
-
-    except Exception as e:
-        print(f"[Roblox Launcher] Error resolving share code via API: {e}")
-        return None, None
-
-
 def _launch_deeplink(place_id: str, link_code: str):
     """
     Last-resort deep link launcher. Works if Roblox is installed and
@@ -694,16 +651,17 @@ def resolve_and_launch_with_cookie(raw_url, cookie):
 
     # If we only have a share code, resolve it via Roblox API
     if share_code and (not place_id or not link_code):
-        print(f"[Roblox Launcher] Detected Share Code: {share_code}.")
-        r_place, r_link = _resolve_share_code(share_code)
-        if r_place and r_link:
-            place_id, link_code = r_place, r_link
+        print(f"[Roblox Launcher] Detected Share Code: {share_code}. Using deep‑link launcher.")
+        url = f"roblox://navigation/share_links?code={share_code}&type=Server"
+        os.startfile(url)
+        return True
+
 
     # If still missing place/link, try a last-resort share deep link
     if not place_id or not link_code:
         if share_code:
             url = f"roblox://navigation/share_links?code={share_code}&type=Server"
-            print(f"[Roblox Launcher] Could not fully resolve IDs. Falling back to Share Deep Link: {url}")
+            print(f"[Roblox Launcher] Launching Share Deep Link: {url}")
             os.startfile(url)
             return True
         else:
@@ -717,82 +675,8 @@ def resolve_and_launch_with_cookie(raw_url, cookie):
         print("[Roblox Launcher] Failed to extract any valid Roblox joining data from the URL.")
         return False
 
-    # At this point we have place_id + link_code
-    # If no cookie, just use deep link
-    if not cookie or cookie.strip() == "":
-        return _launch_deeplink(place_id, link_code)
-
-    # Cookie-based auth ticket flow
-    try:
-        session = requests.Session()
-        session.cookies[".ROBLOSECURITY"] = cookie.strip()
-
-        # First call to get X-CSRF
-        csrf_res = session.post("https://auth.roblox.com/v1/authentication-ticket")
-        csrf_token = csrf_res.headers.get("x-csrf-token")
-
-
-        if not csrf_token:
-            # Try legacy xsrf endpoint as backup
-            xsrf_res = session.post("https://api.roblox.com/v1/xsrf-token")
-            csrf_token = xsrf_res.headers.get("x-csrf-token")
-            csrf_res = xsrf_res
-
-        if not csrf_token:
-            print(
-                "[Roblox Launcher] Failed to obtain X-CSRF token: "
-                f"{_roblox_error_detail(csrf_res)}. Falling back to deep link."
-            )
-            return _launch_deeplink(place_id, link_code)
-
-        headers = {
-            "X-CSRF-TOKEN": csrf_token,
-            "Referer": "https://www.roblox.com",
-            "Content-Type": "application/json",
-        }
-
-        ticket_res = session.post(
-            "https://auth.roblox.com/v1/authentication-ticket",
-            headers=headers,
-            json={},
-        )
-        ticket = ticket_res.headers.get("rbx-authentication-ticket")
-
-
-        if not ticket:
-            print(
-                "[Roblox Launcher] Roblox did not issue an authentication ticket: "
-                f"{_roblox_error_detail(ticket_res)}. Falling back to deep link."
-            )
-            return _launch_deeplink(place_id, link_code)
-
-        launcher_url = (
-            "https://assetgame.roblox.com/game/PlaceLauncher.ashx"
-            f"?request=RequestGame&placeId={place_id}"
-            f"&isPlayTogetherGame=false&privateServerLinkCode={link_code}"
-        )
-        encoded_launcher_url = urllib.parse.quote(launcher_url)
-
-        launch_time = int(time.time() * 1000)
-        launch_str = (
-            "roblox:1"
-            f"+launchmode:play"
-            f"+gameinfo:{ticket}"
-            f"+launchtime:{launch_time}"
-            f"+placelauncherurl:{encoded_launcher_url}"
-            "+robloxLocale:en_us"
-            "+gameLocale:en_us"
-            "+channel:"
-        )
-
-        print("[Roblox Launcher] Launching Roblox using Cookie Auth + PlaceLauncher...")
-        os.startfile(launch_str)
-        return True
-
-    except Exception as e:
-        print(f"[Roblox Launcher] Fatal error during resolution/launch: {e}")
-        print("[Roblox Launcher] Falling back to deep link.")
-        return _launch_deeplink(place_id, link_code)
+    print(f"Launching deeplink to server `roblox://experiences/start?placeId={place_id}&linkCode={link_code}`")
+    return _launch_deeplink(place_id, link_code)
 
 
 class Scanner(discord.Client):

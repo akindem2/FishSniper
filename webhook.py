@@ -75,7 +75,7 @@ class Webhook:
                            screenshot_bytes=None):
         fields = []
         if join_url:
-            fields.append({"name": "Server Link", "value": f"`{join_url}", "inline": False})
+            fields.append({"name": "Server Link", "value": f"`{join_url}`", "inline": False})
         if is_priority_interrupt:
             fields.append({"name": "Priority Interrupt", "value": "Jumped the queue for this biome", "inline": False})
 

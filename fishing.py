@@ -58,6 +58,7 @@ COORDS = {
             "BITE_INDICATOR": (1176, 836),
             "BAR_COLOR": (955, 767),
             "CLAIM_FISH": (1113, 342),
+            "ALT_CLAIMFISH": (1113, 342),  # Replace with actual coordinates
             "MINIGAME_REGION": (757, 762, 404, 20) 
         },
         "MERCHANT": {
@@ -95,6 +96,7 @@ COORDS = {
             "BITE_INDICATOR": (1536, 1119),
             "BAR_COLOR": (1261, 1033),
             "CLAIM_FISH": (1457, 491),
+            "ALT_CLAIMFISH": (1457, 491),  # Replace with actual coordinates
             "MINIGAME_REGION": (1043, 1033, 476, 25)
         },
         "MERCHANT": {
@@ -126,6 +128,7 @@ COORDS = {
             "BITE_INDICATOR": (866, 593),
             "BAR_COLOR": (674, 533),
             "CLAIM_FISH": (829, 218),
+            "ALT_CLAIMFISH": (829, 218),  # Replace with actual coordinates
             "MINIGAME_REGION": (513, 531, 343, 18)
         },
         "MERCHANT": {
@@ -238,7 +241,8 @@ POST_MERCHANT_PATHS = {
             ("hold", "a", 0.7),
             ("hold", "w", 0.4),
             ("hold", "a", 0.8),
-            ("hold", "s", 0.8)
+            ("hold", "s", 0.8),
+            ("hold", "a", 0.2)
         ],
     },
 
@@ -428,6 +432,7 @@ class FishSolBot:
             self.BITE_INDICATOR_POS = COORDS[resolution]["FISHING"]["BITE_INDICATOR"]
             self.BAR_COLOR_POS = COORDS[resolution]["FISHING"]["BAR_COLOR"]
             self.CLAIM_FISH_POS = COORDS[resolution]["FISHING"]["CLAIM_FISH"]
+            self.ALT_CLAIM_FISH_POS = COORDS[resolution]["FISHING"]["ALT_CLAIM_FISH"]
             self.MINIGAME_REGION = COORDS[resolution]["FISHING"]["MINIGAME_REGION"]
             
             self.CAMERA_SETUP_1 = COORDS[resolution]["MERCHANT"]["CAMERA_SETUP_1"]
@@ -1019,6 +1024,15 @@ class FishSolBot:
 
     def do_pathing_routine(self, do_sell=True):
         print(f"=== PATHING ROUTINE STARTED (Selling: {do_sell}) ===")
+
+        pydirectinput.moveTo(self.START_BUTTON_POS[0], self.START_BUTTON_POS[1] - 20)
+        time.sleep(0.1)
+        pydirectinput.moveTo(*self.START_BUTTON_POS, duration=0.2)
+        time.sleep(0.1)
+        pydirectinput.mouseDown()
+        time.sleep(0.05)
+        pydirectinput.mouseUp()
+
         self.reset_character()
         if not self._cycle_active(): return
         self.setup_camera()
@@ -1053,8 +1067,8 @@ class FishSolBot:
                 self.is_waiting_for_start_button = False
                 return
 
-            print("[Fishing Bot] Waiting 10 seconds for Roblox to load before checking for Start button...")
-            for _ in range(20):
+            print("[Fishing Bot] Waiting 15 seconds for Roblox to load before checking for Start button...")
+            for _ in range(30):
                 if not self._cycle_active(): return
                 time.sleep(0.5)
 
@@ -1235,6 +1249,18 @@ class FishSolBot:
         pydirectinput.mouseDown()
         time.sleep(0.1)
         pydirectinput.mouseUp()
+
+        pydirectinput.moveTo(self.ALT_CLAIM_FISH_POS[0], self.ALT_CLAIM_FISH_POS[1] - 50)
+        time.sleep(0.1)
+        pydirectinput.moveTo(*self.ALT_CLAIM_FISH_POS, duration=0.2)
+        time.sleep(0.1)
+        pydirectinput.moveTo(self.ALT_CLAIM_FISH_POS[0]-3, self.ALT_CLAIM_FISH_POS[1], duration=0.1)
+        time.sleep(0.1)
+        pydirectinput.mouseDown()
+        time.sleep(0.1)
+        pydirectinput.mouseUp()
+
+
         time.sleep(0.5)
         
         self.catch_count += 1
