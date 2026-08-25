@@ -589,7 +589,7 @@ class FishSniperUI(ctk.CTk):
 
         self._sidebar_field_label(quick_card, "Starting Path")
         self.path_dropdown = ctk.CTkOptionMenu(
-            quick_card, values=[f"Path {number}" for number in range(1, 6)],
+            quick_card, values=[f"Path {number}" for number in range(1, 13)],
             command=self.on_path_selection, fg_color=THEME["bg_alt"],
             button_color=THEME["accent"], button_hover_color=THEME["accent_hover"],
             dropdown_fg_color=THEME["card"],

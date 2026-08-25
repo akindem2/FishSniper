@@ -58,7 +58,7 @@ COORDS = {
             "BITE_INDICATOR": (1176, 836),
             "BAR_COLOR": (955, 767),
             "CLAIM_FISH": (1113, 342),
-            "ALT_CLAIMFISH": (1113, 342),  # Replace with actual coordinates
+            "ALT_CLAIM_FISH": (1167, 478),  # Replace with actual coordinates
             "MINIGAME_REGION": (757, 762, 404, 20) 
         },
         "MERCHANT": {
@@ -82,13 +82,33 @@ COORDS = {
         # of which item you clicked). ITEMS maps each item name to its own
         # clickable slot position in the Buy list.
         "BUY": {
-            "OPEN_BUY_TAB": (0, 0),
-            "PURCHASE_BUTTON_1": (0, 0),
-            "AMOUNT_BOX": (0, 0),
-            "PURCHASE_BUTTON_2": (0, 0),
-            "CLOSE_ITEM_POPUP": (0, 0),
-            "ITEMS": {item["name"]: (0, 0) for item in BUY_ITEMS},
+            "OPEN_BUY_TAB": (938, 311),
+            "PURCHASE_BUTTON_1": (600, 799),
+            "AMOUNT_BOX": (1117, 506),
+            "PURCHASE_BUTTON_2": (1125, 615),
+            "CLOSE_ITEM_POPUP": (1257, 394),
+            "ITEMS": {
+                "Lucky Potion": (848, 450),
+                "Speed Potion": (1027, 450),
+                "Wind Essence": (1207, 450),
+                "Icicle": (1387, 450),
+
+                "Rainy Bottle": (848, 675),
+                "Haste Potion III": (1027, 675),
+                "Fortune Potion III": (1207, 675),
+                "Gladiator Potion": (1387, 675),
+
+                "Eternal Flame": (848, 814),
+                "Corruptaine": (1027, 814),
+                "Hour Glass": (1207, 814),
+                "NULL?": (1387, 814),
+
+                "Potion of Bound": (848, 600),
+                "Warp Potion": (1027, 600),
+                "Heavenly Potion": (1207, 600)
         },
+}
+
     },
     "1440p": {
         "FISHING": {
@@ -96,7 +116,7 @@ COORDS = {
             "BITE_INDICATOR": (1536, 1119),
             "BAR_COLOR": (1261, 1033),
             "CLAIM_FISH": (1457, 491),
-            "ALT_CLAIMFISH": (1457, 491),  # Replace with actual coordinates
+            "ALT_CLAIM_FISH": (1556, 637),  # Replace with actual coordinates
             "MINIGAME_REGION": (1043, 1033, 476, 25)
         },
         "MERCHANT": {
@@ -114,12 +134,28 @@ COORDS = {
                 "START_BUTTON_POS": (410, 1340),
         },
         "BUY": {
-            "OPEN_BUY_TAB": (0, 0),
-            "PURCHASE_BUTTON_1": (0, 0),
-            "AMOUNT_BOX": (0, 0),
-            "PURCHASE_BUTTON_2": (0, 0),
-            "CLOSE_ITEM_POPUP": (0, 0),
-            "ITEMS": {item["name"]: (0, 0) for item in BUY_ITEMS},
+            "OPEN_BUY_TAB": (1250, 415),
+            "PURCHASE_BUTTON_1": (800, 1065),
+            "AMOUNT_BOX": (1490, 675),
+            "PURCHASE_BUTTON_2": (1500, 820),
+            "CLOSE_ITEM_POPUP": (1676, 525),
+            "ITEMS": {
+                "Lucky Potion": (1130, 600),
+                "Speed Potion": (1370, 600),
+                "Wind Essence": (1610, 600),
+                "Icicle": (1850, 600),
+                "Rainy Bottle": (1130, 900),
+                "Haste Potion III": (1370, 900),
+                "Fortune Potion III": (1610, 900),
+                "Gladiator Potion": (1850, 900),
+                "Eternal Flame": (1130, 1085),
+                "Corruptaine": (1370, 1085),
+                "Hour Glass": (1610, 1085),
+                "NULL?": (1850, 1085),
+                "Potion of Bound": (1130, 800),
+                "Warp Potion": (1370, 800),
+                "Heavenly Potion": (1610, 800),
+            },
         },
     },
     "1366x768": {
@@ -128,7 +164,7 @@ COORDS = {
             "BITE_INDICATOR": (866, 593),
             "BAR_COLOR": (674, 533),
             "CLAIM_FISH": (829, 218),
-            "ALT_CLAIMFISH": (829, 218),  # Replace with actual coordinates
+            "ALT_CLAIM_FISH": (830, 340),  # Replace with actual coordinates
             "MINIGAME_REGION": (513, 531, 343, 18)
         },
         "MERCHANT": {
@@ -143,15 +179,35 @@ COORDS = {
             "CLOSE_MERCHANT": (1050, 197)
         },
         "START": {
-                "START_BUTTON_POS": (221, 714)
+            "START_BUTTON_POS": (221, 714)
         },
         "BUY": {
-            "OPEN_BUY_TAB": (0, 0),
-            "PURCHASE_BUTTON_1": (0, 0),
-            "AMOUNT_BOX": (0, 0),
-            "PURCHASE_BUTTON_2": (0, 0),
-            "CLOSE_ITEM_POPUP": (0, 0),
-            "ITEMS": {item["name"]: (0, 0) for item in BUY_ITEMS},
+            "OPEN_BUY_TAB": (667, 221),
+            "PURCHASE_BUTTON_1": (427, 568),
+            "AMOUNT_BOX": (796, 360),
+            "PURCHASE_BUTTON_2": (801, 437),
+            "CLOSE_ITEM_POPUP": (894, 280),
+
+            "ITEMS": {
+                "Lucky Potion": (603, 320),
+                "Speed Potion": (732, 320),
+                "Wind Essence": (860, 320),
+                "Icicle": (989, 320),
+
+                "Rainy Bottle": (603, 480),
+                "Haste Potion III": (732, 480),
+                "Fortune Potion III": (860, 480),
+                "Gladiator Potion": (989, 480),
+
+                "Eternal Flame": (603, 579),
+                "Corruptaine": (732, 579),
+                "Hour Glass": (860, 579),
+                "NULL?": (989, 579),
+
+                "Potion of Bound": (603, 427),
+                "Warp Potion": (732, 427),
+                "Heavenly Potion": (860, 427)
+            },
         },
     }
 }
@@ -203,6 +259,7 @@ def _default_post_merchant_path(timing):
 POST_MERCHANT_PATHS = {
     "VIP": {
         "Path 1": _default_post_merchant_path(PATHING_TIMINGS["VIP"]),
+
         "Path 2": [
             ("click", "CLOSE_MERCHANT"),
             ("hold", "d", 0.1),
@@ -210,6 +267,7 @@ POST_MERCHANT_PATHS = {
             ("hold", "a", 0.7),
             ("hold", "w", 0.6),
         ],
+
         "Path 3": [
             ("click", "CLOSE_MERCHANT"),
             ("hold", "d", 0.1),
@@ -219,6 +277,7 @@ POST_MERCHANT_PATHS = {
             ("hold", "a", 0.3),
             ("hold", "w", 0.3),
         ],
+
         "Path 4": [
             ("click", "CLOSE_MERCHANT"),
             ("hold", "d", 0.1),
@@ -230,6 +289,7 @@ POST_MERCHANT_PATHS = {
             ("hold", "a", 0.7),
             ("hold", "w", 0.4),
         ],
+
         "Path 5": [
             ("click", "CLOSE_MERCHANT"),
             ("hold", "d", 0.1),
@@ -244,10 +304,74 @@ POST_MERCHANT_PATHS = {
             ("hold", "s", 0.8),
             ("hold", "a", 0.2)
         ],
+
+        "Path 6": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", .1),
+            ("wait", 0.1),
+            ("hold", "w", 2.0),
+            ("hold", "s", 0.3),
+            ("hold", "d", 0.8)
+        ],
+
+        "Path 7": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", .1),
+            ("wait", 0.1),
+            ("hold", "w", 2.0),
+            ("hold", "s", 0.3),
+            ("hold", "d", 1.6),
+        ],
+
+        "Path 8": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", .1),
+            ("wait", 0.1),
+            ("hold", "w", 2.0),
+            ("hold", "s", 0.3),
+            ("hold", "d", 2.0),
+        ],
+
+        "Path 9": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", .1),
+            ("wait", 0.1),
+            ("hold", "w", 2.0),
+            ("hold", "s", 0.3),
+            ("hold", "d", 2.0),
+        ],
+
+        "Path 10": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", .1),
+            ("wait", 0.1),
+            ("hold", "w", 2.0),
+            ("hold", "s", 0.3),
+            ("hold", "d", 2.8),
+        ],
+
+        "Path 11": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", .1),
+            ("wait", 0.1),
+            ("hold", "w", 2.0),
+            ("hold", "s", 0.3),
+            ("hold", "d", 3.2),
+        ],
+
+        "Path 12": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", .1),
+            ("wait", 0.1),
+            ("hold", "w", 2.0),
+            ("hold", "s", 0.3),
+            ("hold", "d", 3.8),
+        ],
     },
 
     "NORMAL": {
         "Path 1": _default_post_merchant_path(PATHING_TIMINGS["NORMAL"]),
+
         "Path 2": [
             ("click", "CLOSE_MERCHANT"),
             ("hold", "d", 0.12),
@@ -255,6 +379,7 @@ POST_MERCHANT_PATHS = {
             ("hold", "a", 0.84),
             ("hold", "w", 0.72),
         ],
+
         "Path 3": [
             ("click", "CLOSE_MERCHANT"),
             ("hold", "d", 0.12),
@@ -264,6 +389,7 @@ POST_MERCHANT_PATHS = {
             ("hold", "a", 0.36),
             ("hold", "w", 0.36),
         ],
+
         "Path 4": [
             ("click", "CLOSE_MERCHANT"),
             ("hold", "d", 0.12),
@@ -275,6 +401,7 @@ POST_MERCHANT_PATHS = {
             ("hold", "a", 0.84),
             ("hold", "w", 0.48),
         ],
+
         "Path 5": [
             ("click", "CLOSE_MERCHANT"),
             ("hold", "d", 0.12),
@@ -286,8 +413,73 @@ POST_MERCHANT_PATHS = {
             ("hold", "a", 0.84),
             ("hold", "w", 0.48),
             ("hold", "a", 0.96),
+            ("hold", "s", 0.96),
+            ("hold", "a", 0.24),
         ],
-    }
+
+        "Path 6": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", 0.12),
+            ("wait", 0.12),
+            ("hold", "w", 2.4),
+            ("hold", "s", 0.36),
+            ("hold", "d", 0.96),
+        ],
+
+        "Path 7": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", 0.12),
+            ("wait", 0.12),
+            ("hold", "w", 2.4),
+            ("hold", "s", 0.36),
+            ("hold", "d", 1.92),
+        ],
+
+        "Path 8": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", 0.12),
+            ("wait", 0.12),
+            ("hold", "w", 2.4),
+            ("hold", "s", 0.36),
+            ("hold", "d", 2.4),
+        ],
+
+        "Path 9": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", 0.12),
+            ("wait", 0.12),
+            ("hold", "w", 2.4),
+            ("hold", "s", 0.36),
+            ("hold", "d", 2.4),
+        ],
+
+        "Path 10": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", 0.12),
+            ("wait", 0.12),
+            ("hold", "w", 2.4),
+            ("hold", "s", 0.36),
+            ("hold", "d", 3.36),
+        ],
+
+        "Path 11": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", 0.12),
+            ("wait", 0.12),
+            ("hold", "w", 2.4),
+            ("hold", "s", 0.36),
+            ("hold", "d", 3.84),
+        ],
+
+        "Path 12": [
+            ("click", "CLOSE_MERCHANT"),
+            ("hold", "d", 0.12),
+            ("wait", 0.12),
+            ("hold", "w", 2.4),
+            ("hold", "s", 0.36),
+            ("hold", "d", 4.56),
+        ],
+    },
 }
 
 TOLERANCE = 10
@@ -297,7 +489,7 @@ MAX_WAIT_FOR_CAST = 35
 
 # User-configurable start button detection values.
 START_BUTTON_COLOR = (127, 255, 147)
-START_BUTTON_COLOR_TOLERANCE = 15
+START_BUTTON_COLOR_TOLERANCE = 5
 START_BUTTON_WAIT_TIMEOUT = 120
 
 class FishSolBot:
@@ -527,7 +719,7 @@ class FishSolBot:
         outer fishing loop every tick, which would re-focus the window far
         more often than intended) until fishing is re-enabled or the
         session ends."""
-        print("[Fishing Bot] Fishing disabled for this biome — sitting idle with anti-AFK enabled.")
+        print("[Fishing Bot] Fishing disabled for this biome, sitting idle with anti-AFK enabled.")
         while self._cycle_active() and not self.fishing_enabled:
             now = time.time()
             if self._last_anti_afk_press is None or now - self._last_anti_afk_press >= self.anti_afk_interval:
@@ -632,7 +824,7 @@ class FishSolBot:
             triggered_sell = True
             self.consecutive_failsafes = 0
             self.total_consecutive_failsafes = 0
-            print(f"[Fishing Bot] {self.FAILSAFE_SELL_THRESHOLD} failsafes in a row — "
+            print(f"[Fishing Bot] {self.FAILSAFE_SELL_THRESHOLD} failsafes in a row, "
                   "selling off inventory and restarting the fishing cycle.")
 
         if self.failsafe_callback:
@@ -920,6 +1112,9 @@ class FishSolBot:
         if scroll_items:
             if not self._cycle_active(): return
             print("[Auto-Buy] Scrolling down to reach the remaining items...")
+            #Move to the scroll area and scroll down
+            pyautogui.moveTo(self.ALT_CLAIM_FISH_POS[0], self.ALT_CLAIM_FISH_POS[1]-3)
+            pyautogui.moveTo(self.ALT_CLAIM_FISH_POS[0], self.ALT_CLAIM_FISH_POS[1], duration=0.2)
             for _ in range(BUY_SCROLL_STEPS):
                 if not self._cycle_active(): return
                 pyautogui.scroll(BUY_SCROLL_AMOUNT)
@@ -936,13 +1131,13 @@ class FishSolBot:
         name = item["name"]
         pos = self.BUY_ITEM_POSITIONS.get(name)
         if not pos or pos == (0, 0):
-            print(f"[Auto-Buy] No coordinates configured for '{name}' yet — skipping.")
+            print(f"[Auto-Buy] No coordinates configured for '{name}' yet, skipping.")
             return
 
         print(f"[Auto-Buy] Buying {qty}x {name}...")
 
         # Click the item in the Buy list.
-        pydirectinput.moveTo(pos[0], pos[1] - 50)
+        pydirectinput.moveTo(pos[0], pos[1] - 3)
         pydirectinput.moveTo(pos[0], pos[1], duration=0.2)
         time.sleep(0.1)
         pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
@@ -950,7 +1145,7 @@ class FishSolBot:
         if not self._cycle_active(): return
 
         # First Purchase button — opens the amount/confirm popup.
-        pydirectinput.moveTo(self.BUY_PURCHASE_BUTTON_1[0], self.BUY_PURCHASE_BUTTON_1[1] - 50)
+        pydirectinput.moveTo(self.BUY_PURCHASE_BUTTON_1[0], self.BUY_PURCHASE_BUTTON_1[1] - 3)
         pydirectinput.moveTo(self.BUY_PURCHASE_BUTTON_1[0], self.BUY_PURCHASE_BUTTON_1[1], duration=0.2)
         time.sleep(0.1)
         pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
@@ -958,7 +1153,7 @@ class FishSolBot:
         if not self._cycle_active(): return
 
         # Amount box — clicking it auto-selects/overwrites the pre-filled value.
-        pydirectinput.moveTo(self.BUY_AMOUNT_BOX[0], self.BUY_AMOUNT_BOX[1] - 50)
+        pydirectinput.moveTo(self.BUY_AMOUNT_BOX[0], self.BUY_AMOUNT_BOX[1] - 3)
         pydirectinput.moveTo(self.BUY_AMOUNT_BOX[0], self.BUY_AMOUNT_BOX[1], duration=0.2)
         time.sleep(0.1)
         pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
@@ -969,7 +1164,7 @@ class FishSolBot:
         if not self._cycle_active(): return
 
         # Second/confirm Purchase button.
-        pydirectinput.moveTo(self.BUY_PURCHASE_BUTTON_2[0], self.BUY_PURCHASE_BUTTON_2[1] - 50)
+        pydirectinput.moveTo(self.BUY_PURCHASE_BUTTON_2[0], self.BUY_PURCHASE_BUTTON_2[1] - 3)
         pydirectinput.moveTo(self.BUY_PURCHASE_BUTTON_2[0], self.BUY_PURCHASE_BUTTON_2[1], duration=0.2)
         time.sleep(0.1)
         pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
@@ -977,7 +1172,7 @@ class FishSolBot:
         if not self._cycle_active(): return
 
         # Close the item's buy popup (separate from the merchant's own X).
-        pydirectinput.moveTo(self.BUY_CLOSE_ITEM_POPUP[0], self.BUY_CLOSE_ITEM_POPUP[1] - 50)
+        pydirectinput.moveTo(self.BUY_CLOSE_ITEM_POPUP[0], self.BUY_CLOSE_ITEM_POPUP[1] - 3)
         pydirectinput.moveTo(self.BUY_CLOSE_ITEM_POPUP[0], self.BUY_CLOSE_ITEM_POPUP[1], duration=0.2)
         time.sleep(0.1)
         pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
