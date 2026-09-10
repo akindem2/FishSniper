@@ -1,17 +1,21 @@
-import customtkinter as ctk
-import threading
-import json
+import sys
 import io
-import requests
+import json
+import math
+import random
+import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from PIL import Image
+from html import escape
+from pathlib import Path
+import os
+
+import requests
+
+from PySide6 import QtCore, QtGui, QtWidgets
+
 import fishing
 from discord_scanner import scanner, biome_thumbnail_url, format_biome_duration
-import os
-from pathlib import Path
-import sys
-from tkinter import messagebox
 
 try:
     import keyboard
@@ -22,9 +26,9 @@ except Exception as e:
 DEFAULT_START_HOTKEY = "f1"
 DEFAULT_STOP_HOTKEY = "f2"
 
-# Mirrors fishing.py's restock boundary logic, kept separate so the UI can
-# compute "bought today" status for display without reaching into fish_loop
-# internals.
+MAX_AUTO_ITEMS = 100
+MAX_GAUNTLETS = 20
+
 SHOP_RESTOCK_HOUR_ET = 20
 SHOP_RESTOCK_TZ = ZoneInfo("America/New_York")
 
@@ -36,29 +40,41 @@ def current_shop_restock_boundary():
         boundary -= timedelta(days=1)
     return boundary
 
+
 # ---------------------------------------------------------------------------
-# Theme
+# Theme — "deep-water" ocean palette (adapted from the MerchantSnipe
+# "arcane-midnight" PySide6 UI, recolored blue for the fishing/water motif).
 # ---------------------------------------------------------------------------
 THEME = {
-    "bg": "#0f1117",
-    "bg_alt": "#151822",
-    "card": "#1b1f2b",
-    "card_border": "#2a2f3d",
-    "card_hover": "#232838",
-    "accent": "#22d3ee",
-    "accent_hover": "#0891b2",
-    "accent2": "#8b5cf6",
-    "accent2_hover": "#6d28d9",
-    "success": "#22c55e",
-    "success_hover": "#16a34a",
-    "danger": "#ef4444",
-    "danger_hover": "#b91c1c",
-    "text": "#e5e7eb",
-    "text_dim": "#9ca3af",
-    "text_faint": "#5b6272",
+    "bg": "#081525",
+    "bg_alt": "#0b1c30",
+    "card": "#102942",
+    "card_border": "#1e3f63",
+    "card_hover": "#163351",
+    "accent": "#38bdf8",
+    "accent_hover": "#7dd3fc",
+    "accent2": "#2563eb",
+    "accent2_hover": "#1d4ed8",
+    "success": "#14b8a6",
+    "success_hover": "#0d9488",
+    "danger": "#fb7185",
+    "danger_hover": "#f43f5e",
+    "text": "#e6f0fb",
+    "text_dim": "#93a7c2",
+    "text_faint": "#586c86",
 }
 
-TIER_COLORS = ["#22d3ee", "#38bdf8", "#818cf8", "#a78bfa", "#c084fc", "#e879f9", "#f472b6", "#fb923c"]
+# Background gradient stops for the animated backdrop.
+BG_TOP = "#0a1f38"
+BG_BOTTOM = "#04070f"
+
+# Translucent surfaces so the animated background shows through cards/inputs.
+SURFACE = "rgba(16, 41, 66, 0.72)"
+SIDEBAR = "rgba(9, 20, 34, 0.86)"
+INPUT_BG = "rgba(6, 15, 28, 0.55)"
+SURFACE_SOLID = "#102942"
+
+TIER_COLORS = ["#7dd3fc", "#38bdf8", "#0ea5e9", "#2563eb", "#6366f1", "#22d3ee", "#2dd4bf", "#14b8a6"]
 
 
 def tier_color(tier_index):
@@ -75,77 +91,69 @@ BIOME_ICONS = {
     "Blazing Sun": "☀️",
 }
 
-# Default check-in screenshot config used only to seed a sensible starting
-# point the first time each biome's flap is built (or when no saved value
-# exists yet). Every biome gets a flap now — these three are just pre-enabled
-# with their original delays; everything else starts disabled with a
-# reasonable default delay that the user can turn on and tweak.
 DEFAULT_CHECKIN_SCREENSHOT_CONFIG = {
     "Glitched": {"enabled": True, "delay": 20},
     "Dreamspace": {"enabled": True, "delay": 20},
     "Cyberspace": {"enabled": True, "delay": 60},
 }
-DEFAULT_CHECKIN_DELAY = 30  # seed delay for biomes with no default above
+DEFAULT_CHECKIN_DELAY = 30
 
-# ---------------------------------------------------------------------------
-# Biome thumbnails (downloaded lazily on a background thread; emoji above are
-# the fallback shown until a thumbnail loads, or if it fails to load at all)
-# ---------------------------------------------------------------------------
-_biome_pil_cache = {}   # biome -> PIL.Image or None; safe to populate off the main thread
-_biome_ctk_image_cache = {}  # (biome, size) -> ctk.CTkImage; must be built on the main thread
-
-
-def fetch_biome_pil_image(biome_name):
-    """Downloads + decodes a biome's thumbnail. Thread-safe (pure I/O + PIL, no Tk calls)."""
-    if biome_name in _biome_pil_cache:
-        return _biome_pil_cache[biome_name]
-    try:
-        resp = requests.get(biome_thumbnail_url(biome_name), timeout=4)
-        resp.raise_for_status()
-        img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
-        _biome_pil_cache[biome_name] = img
-        return img
-    except Exception as e:
-        print(f"[UI] Could not load thumbnail for {biome_name}: {e}")
-        _biome_pil_cache[biome_name] = None
-        return None
-
-
-def get_biome_ctk_image(biome_name, size=(20, 20)):
-    """Builds (and caches) a CTkImage from the PIL cache. Call only on the main thread."""
-    key = (biome_name, size)
-    if key in _biome_ctk_image_cache:
-        return _biome_ctk_image_cache[key]
-    pil_img = _biome_pil_cache.get(biome_name)
-    if pil_img is None:
-        return None
-    ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=size)
-    _biome_ctk_image_cache[key] = ctk_img
-    return ctk_img
-
-# Used only to seed a sensible default the first time the Priority tab is
-# used (mirrors the tiers that used to be hardcoded). After that, whatever
-# the user arranges in the UI is what's saved and loaded from then on.
 DEFAULT_TIER_SEED = [
     ["Glitched", "Dreamspace", "Cyberspace"],
     ["Singularity"],
     ["Rainy", "Snowy", "Windy", "Hell", "Heaven", "Corruption", "Starfall", "Sand Storm", "Null"],
 ]
 
+# ---------------------------------------------------------------------------
+# Biome thumbnails (downloaded lazily on a background thread; the emoji above
+# are the fallback shown until a thumbnail loads, or if it fails entirely).
+# ---------------------------------------------------------------------------
+_biome_bytes_cache = {}   # biome -> raw image bytes or None (safe off the main thread)
+_biome_pixmap_cache = {}  # (biome, size) -> QPixmap (build only on the main/GUI thread)
+
+
+def fetch_biome_bytes(biome_name):
+    """Downloads a biome's thumbnail bytes. Thread-safe (pure network I/O)."""
+    if biome_name in _biome_bytes_cache:
+        return _biome_bytes_cache[biome_name]
+    try:
+        resp = requests.get(biome_thumbnail_url(biome_name), timeout=4)
+        resp.raise_for_status()
+        _biome_bytes_cache[biome_name] = resp.content
+        return resp.content
+    except Exception as e:
+        print(f"[UI] Could not load thumbnail for {biome_name}: {e}")
+        _biome_bytes_cache[biome_name] = None
+        return None
+
+
+def get_biome_pixmap(biome_name, size=20):
+    """Builds (and caches) a QPixmap from the downloaded bytes. GUI thread only."""
+    key = (biome_name, size)
+    if key in _biome_pixmap_cache:
+        return _biome_pixmap_cache[key]
+    data = _biome_bytes_cache.get(biome_name)
+    if not data:
+        return None
+    pix = QtGui.QPixmap()
+    if not pix.loadFromData(data):
+        return None
+    pix = pix.scaled(size, size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+    _biome_pixmap_cache[key] = pix
+    return pix
+
+
 fish_loop = fishing.FishSolBot()
 
-# Settings file path in LOCALAPPDATA
 SETTINGS_DIR = Path(os.getenv("LOCALAPPDATA")) / "FishSniper"
 SETTINGS_FILE = SETTINGS_DIR / "settings.json"
 
 
 def ensure_settings_dir():
-    """Create settings directory if it doesn't exist"""
     SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def load_settings_from_file():
-    """Load settings from LOCALAPPDATA"""
     ensure_settings_dir()
     if SETTINGS_FILE.exists():
         try:
@@ -157,7 +165,6 @@ def load_settings_from_file():
 
 
 def save_settings_to_file(settings_data):
-    """Save settings to LOCALAPPDATA"""
     ensure_settings_dir()
     try:
         with open(SETTINGS_FILE, 'w') as f:
@@ -168,17 +175,15 @@ def save_settings_to_file(settings_data):
 
 
 # ---------------------------------------------------------------------------
-# Log line coloring — each line in the Dashboard log box is colored based on
-# which subsystem ("worker") printed it, read from its leading "[Tag]".
-# Explicit "...Error" tags always win over their subsystem's color, so
-# failures still stand out even within a busy log.
+# Log line coloring — each line in the Dashboard log is colored based on which
+# subsystem ("worker") printed it, read from its leading "[Tag]".
 # ---------------------------------------------------------------------------
 LOG_LINE_COLOR_GROUPS = [
-    (("[Webhook Error]", "[Settings Save Error]", "[Settings Load Error]"), "#ef4444"),
+    (("[Webhook Error]", "[Settings Save Error]", "[Settings Load Error]"), "#fb7185"),
     (("[Fishing Bot]", "[Pathing]", "[Auto-Sell]"), "#38bdf8"),
     (("[Discord Scanner]", "[Log Scanner]"), "#a78bfa"),
     (("[Roblox Launcher]", "[Resolver]"), "#f472b6"),
-    (("[Webhook]",), "#22c55e"),
+    (("[Webhook]",), "#2dd4bf"),
     (("[FishSniper]",), "#fbbf24"),
     (("[System]", "[UI]", "[Settings]", "[Settings Saved]"), "#9ca3af"),
 ]
@@ -192,306 +197,413 @@ def _color_for_log_line(line):
     return THEME["text"]
 
 
-class DualLogger(object):
-    """Mirrors stdout/stderr into the Dashboard log textbox, colorizing each
-    line based on which subsystem printed it (its leading "[Tag]"), so
-    fishing/pathing, Discord scanning, webhook, and system messages are easy
-    to tell apart at a glance."""
+# ---------------------------------------------------------------------------
+# Stylesheet (QSS) built from the palette above.
+# ---------------------------------------------------------------------------
+def build_qss():
+    T = THEME
+    return f"""
+    QWidget {{
+        color: {T['text']};
+        font-family: "Segoe UI", system-ui, sans-serif;
+        font-size: 13px;
+    }}
+    QToolTip {{ background: {SURFACE_SOLID}; color: {T['text']}; border: 1px solid {T['card_border']}; }}
 
-    def __init__(self, widget, original_stdout):
-        self.widget = widget
+    /* Sidebar */
+    QFrame#sidebar {{ background: {SIDEBAR}; border: none; border-right: 1px solid {T['card_border']}; }}
+    QLabel#brand {{ font-size: 18px; font-weight: 800; letter-spacing: 1px; color: {T['text']}; }}
+    QLabel#brandSub {{ color: {T['accent']}; font-size: 10px; letter-spacing: 3px; font-weight: 700; }}
+    QLabel#activePath {{ color: {T['accent']}; font-size: 11px; font-weight: 600; }}
+
+    QPushButton#nav {{
+        background: transparent; color: {T['text_dim']};
+        text-align: left; padding: 9px 14px;
+        border: none; border-left: 3px solid transparent; border-radius: 9px;
+        font-size: 13px; font-weight: 600;
+    }}
+    QPushButton#nav:hover {{ background: rgba(255,255,255,0.05); color: {T['text']}; }}
+    QPushButton#nav:checked {{
+        background: rgba(56,189,248,0.14); color: {T['accent']};
+        border-left: 3px solid {T['accent']};
+    }}
+
+    /* Header */
+    QLabel#pageTitle {{ font-size: 20px; font-weight: 800; }}
+    QLabel#statusPill {{
+        background: {INPUT_BG}; border: 1px solid {T['card_border']};
+        border-radius: 12px; padding: 5px 12px; font-weight: 700; color: {T['text_dim']};
+    }}
+
+    /* Cards */
+    QFrame#card {{
+        background: {SURFACE}; border: 1px solid {T['card_border']}; border-radius: 16px;
+    }}
+    QFrame#innerCard {{
+        background: {INPUT_BG}; border: 1px solid {T['card_border']}; border-radius: 12px;
+    }}
+    QLabel#h1 {{ font-size: 22px; font-weight: 800; }}
+    QLabel#heading {{ font-size: 15px; font-weight: 800; }}
+    QLabel#muted {{ color: {T['text_dim']}; }}
+    QLabel#faint {{ color: {T['text_faint']}; font-size: 11px; }}
+    QLabel#caption {{ color: {T['text_faint']}; font-size: 10px; font-weight: 700; letter-spacing: 1px; }}
+
+    /* Buttons (default = water blue) */
+    QPushButton {{
+        background: {T['accent']}; color: #06202e; border: none;
+        padding: 8px 16px; border-radius: 10px; font-weight: 700;
+    }}
+    QPushButton:hover {{ background: {T['accent_hover']}; }}
+    QPushButton:disabled {{ background: {T['card_border']}; color: {T['text_faint']}; }}
+    QPushButton#start {{ background: {T['success']}; color: #04231d; font-size: 14px; }}
+    QPushButton#start:hover {{ background: {T['success_hover']}; }}
+    QPushButton#stop {{ background: {T['danger']}; color: #2a0710; font-size: 14px; }}
+    QPushButton#stop:hover {{ background: {T['danger_hover']}; }}
+    QPushButton#ghost {{ background: transparent; color: {T['accent']}; border: 1px solid {T['card_border']}; }}
+    QPushButton#ghost:hover {{ background: rgba(56,189,248,0.10); border: 1px solid {T['accent']}; }}
+    QPushButton#danger {{ background: {T['danger']}; color: #2a0710; }}
+    QPushButton#danger:hover {{ background: {T['danger_hover']}; }}
+    QPushButton#iconGhost {{
+        background: transparent; color: {T['text_dim']}; border: none; padding: 2px; font-weight: 800;
+    }}
+    QPushButton#iconGhost:hover {{ color: {T['danger']}; background: rgba(251,113,133,0.12); }}
+
+    /* Inputs */
+    QLineEdit, QComboBox, QPlainTextEdit, QTextEdit {{
+        background: {INPUT_BG}; border: 1px solid {T['card_border']};
+        border-radius: 9px; padding: 6px 8px;
+        selection-background-color: {T['accent']}; selection-color: #06202e;
+    }}
+    QLineEdit:focus, QComboBox:focus {{ border: 1px solid {T['accent']}; }}
+    QComboBox::drop-down {{ border: none; width: 20px; }}
+    QComboBox QAbstractItemView {{
+        background: {SURFACE_SOLID}; border: 1px solid {T['card_border']};
+        selection-background-color: {T['accent']}; selection-color: #06202e; outline: none;
+    }}
+
+    /* Checkboxes (used in place of switches) */
+    QCheckBox {{ spacing: 8px; color: {T['text']}; }}
+    QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 5px;
+        border: 1px solid {T['card_border']}; background: {INPUT_BG}; }}
+    QCheckBox::indicator:checked {{ background: {T['accent']}; border: 1px solid {T['accent']}; }}
+
+    /* Tier lists (priority board) */
+    QListWidget#tierList {{
+        background: {INPUT_BG}; border: 1px solid {T['card_border']}; border-radius: 10px;
+        padding: 4px;
+    }}
+    QListWidget#tierList::item {{
+        background: {SURFACE_SOLID}; border: 1px solid {T['card_border']}; border-radius: 8px;
+        padding: 7px 8px; margin: 3px; color: {T['text']};
+    }}
+    QListWidget#tierList::item:selected {{ border: 1px solid {T['accent']}; }}
+
+    /* Scroll areas transparent so the backdrop shows through */
+    QScrollArea {{ background: transparent; border: none; }}
+    QScrollArea > QWidget > QWidget {{ background: transparent; }}
+    QScrollBar:vertical {{ background: transparent; width: 11px; margin: 2px; }}
+    QScrollBar::handle:vertical {{ background: {T['card_border']}; border-radius: 5px; min-height: 26px; }}
+    QScrollBar::handle:vertical:hover {{ background: {T['accent']}; }}
+    QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
+    QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+    QScrollBar:horizontal {{ background: transparent; height: 11px; margin: 2px; }}
+    QScrollBar::handle:horizontal {{ background: {T['card_border']}; border-radius: 5px; min-width: 26px; }}
+    QScrollBar::handle:horizontal:hover {{ background: {T['accent']}; }}
+    """
+
+
+# ---------------------------------------------------------------------------
+# Animated backdrop (adapted from MerchantSnipe's AnimatedBackground, blue).
+# ---------------------------------------------------------------------------
+class AnimatedBackground(QtWidgets.QWidget):
+    def __init__(self, parent=None, bubble_count=46):
+        super().__init__(parent)
+        self._t = 0.0
+        rng = random.Random(7)
+        # (nx, ny, radius, base_alpha, rise_speed, phase, sway_amp)
+        self._bubbles = [
+            (rng.random(), rng.random(), rng.uniform(2.0, 7.0), rng.uniform(28, 82),
+             rng.uniform(0.0016, 0.0060), rng.uniform(0, 6.28), rng.uniform(3.0, 12.0))
+            for _ in range(bubble_count)
+        ]
+        self._timer = QtCore.QTimer(self)
+        self._timer.setInterval(50)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start()
+
+    def _tick(self):
+        self._t += 0.05
+        moved = []
+        for (nx, ny, r, a, rise, ph, sway) in self._bubbles:
+            ny -= rise  # bubbles drift upward
+            if ny < -0.05:
+                # respawn just below the bottom edge at a fresh horizontal spot
+                ny = 1.05
+                nx = random.random()
+            moved.append((nx, ny, r, a, rise, ph, sway))
+        self._bubbles = moved
+        self.update()
+
+    def paintEvent(self, event):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        w, h = self.width(), self.height()
+
+        grad = QtGui.QLinearGradient(0, 0, 0, h)
+        grad.setColorAt(0.0, QtGui.QColor(BG_TOP))
+        grad.setColorAt(1.0, QtGui.QColor(BG_BOTTOM))
+        p.fillRect(self.rect(), grad)
+
+        # Soft "current" glows in the water-blue / teal accents.
+        self._glow(p, w * 0.18, h * 0.12, max(w, h) * 0.5, QtGui.QColor(56, 189, 248, 34))
+        self._glow(p, w * 0.88, h * 0.78, max(w, h) * 0.55, QtGui.QColor(45, 212, 191, 26))
+        self._glow(p, w * 0.62, h * 0.30, max(w, h) * 0.35, QtGui.QColor(37, 99, 235, 22))
+
+        # Rising bubbles: a translucent body, a brighter rim, and a small
+        # sheen highlight so they read as air bubbles in water.
+        for (nx, ny, r, base_a, _rise, ph, sway) in self._bubbles:
+            x = nx * w + math.sin(self._t * 1.2 + ph) * sway
+            y = ny * h
+            center = QtCore.QPointF(x, y)
+            a = int(base_a)
+
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(QtGui.QColor(150, 210, 240, int(a * 0.35)))
+            p.drawEllipse(center, r, r)
+
+            rim = QtGui.QPen(QtGui.QColor(200, 232, 250, min(255, int(a * 1.6))))
+            rim.setWidthF(1.1)
+            p.setPen(rim)
+            p.setBrush(QtCore.Qt.NoBrush)
+            p.drawEllipse(center, r, r)
+
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(QtGui.QColor(255, 255, 255, min(255, int(a * 1.2))))
+            hl = max(0.8, r * 0.28)
+            p.drawEllipse(QtCore.QPointF(x - r * 0.32, y - r * 0.32), hl, hl)
+        p.end()
+
+    @staticmethod
+    def _glow(p, cx, cy, radius, color):
+        g = QtGui.QRadialGradient(cx, cy, radius)
+        g.setColorAt(0.0, color)
+        transparent = QtGui.QColor(color)
+        transparent.setAlpha(0)
+        g.setColorAt(1.0, transparent)
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(g)
+        p.drawEllipse(QtCore.QPointF(cx, cy), radius, radius)
+
+
+# ---------------------------------------------------------------------------
+# Status pill + log emitter helpers.
+# ---------------------------------------------------------------------------
+class StatusPill(QtWidgets.QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("statusPill")
+        self.set_state("Stopped", THEME["text_faint"])
+
+    def set_state(self, text, color):
+        self.setText(f'<span style="color:{color}">●</span> {escape(text)}')
+
+
+class _LogEmitter(QtCore.QObject):
+    line = QtCore.Signal(str, str)  # (text, color)
+
+
+class DualLogger(object):
+    """Mirrors stdout/stderr into the Dashboard log view, colorizing each line
+    by the subsystem that printed it. Writes can arrive from any thread, so the
+    actual widget update is marshaled onto the GUI thread via a queued signal."""
+
+    def __init__(self, emitter, original_stdout):
+        self.emitter = emitter
         self.original_stdout = original_stdout
         self._buffer = ""
-        self._configured_tags = set()
 
     def write(self, text):
         if self.original_stdout is not None:
-            self.original_stdout.write(text)
-            self.original_stdout.flush()
-
-        # print() writes the message and its trailing newline as two
-        # separate write() calls, so lines are buffered here and only
-        # emitted — with a color read from their own prefix — once a
-        # newline actually arrives.
+            try:
+                self.original_stdout.write(text)
+                self.original_stdout.flush()
+            except Exception:
+                pass
         self._buffer += text
         *complete_lines, self._buffer = self._buffer.split("\n")
         for line in complete_lines:
-            self._emit_line(line + "\n")
-
-    def _emit_line(self, line_with_newline):
-        color = _color_for_log_line(line_with_newline)
-
-        def append():
-            try:
-                tag = f"logcolor_{color.lstrip('#')}"
-                if tag not in self._configured_tags:
-                    self.widget.tag_config(tag, foreground=color)
-                    self._configured_tags.add(tag)
-                self.widget.configure(state="normal")
-                self.widget.insert("end", line_with_newline, tag)
-                self.widget.see("end")
-                self.widget.configure(state="disabled")
-            except Exception:
-                # A logging hiccup (e.g. an unexpected textbox API) should
-                # never take the whole app down — fall back to a plain,
-                # uncolored insert instead.
-                try:
-                    self.widget.configure(state="normal")
-                    self.widget.insert("end", line_with_newline)
-                    self.widget.see("end")
-                    self.widget.configure(state="disabled")
-                except Exception:
-                    pass
-        self.widget.after(0, append)
+            self.emitter.line.emit(line, _color_for_log_line(line + "\n"))
 
     def flush(self):
         if self.original_stdout is not None:
-            self.original_stdout.flush()
+            try:
+                self.original_stdout.flush()
+            except Exception:
+                pass
 
 
-class StatusPill(ctk.CTkFrame):
-    """Small rounded status indicator: colored dot + text."""
-    def __init__(self, master, **kwargs):
-        super().__init__(master, fg_color=THEME["card"], corner_radius=20, border_width=1,
-                          border_color=THEME["card_border"], **kwargs)
-        self.dot = ctk.CTkLabel(self, text="●", text_color=THEME["text_faint"], font=ctk.CTkFont(size=14))
-        self.dot.pack(side="left", padx=(14, 4), pady=8)
-        self.text_label = ctk.CTkLabel(self, text="Stopped", text_color=THEME["text_dim"],
-                                        font=ctk.CTkFont(size=12, weight="bold"))
-        self.text_label.pack(side="left", padx=(0, 14), pady=8)
-
-    def set_state(self, text, color):
-        self.text_label.configure(text=text)
-        self.dot.configure(text_color=color)
-
-
-class BiomeCard(ctk.CTkFrame):
-    """A draggable card representing one biome, used on the Priority board."""
-    def __init__(self, master, biome_name, board, **kwargs):
-        super().__init__(master, fg_color=THEME["card"], corner_radius=10, border_width=1,
-                          border_color=THEME["card_border"], height=40, **kwargs)
-        self.biome_name = biome_name
+# ---------------------------------------------------------------------------
+# Priority board (native Qt drag-and-drop between tier columns).
+# ---------------------------------------------------------------------------
+class _BiomeList(QtWidgets.QListWidget):
+    def __init__(self, board, key):
+        super().__init__()
         self.board = board
-        self.pack_propagate(False)
+        self.key = key
+        self.setObjectName("tierList")
+        self.setDragDropMode(QtWidgets.QAbstractItemView.DragDrop)
+        self.setDefaultDropAction(QtCore.Qt.MoveAction)
+        self.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.setSpacing(0)
+        self.setFixedWidth(184)
 
-        thumb = get_biome_ctk_image(biome_name, size=(18, 18))
-        if thumb:
-            self.icon_label = ctk.CTkLabel(self, text="", image=thumb)
-        else:
-            self.icon_label = ctk.CTkLabel(self, text=BIOME_ICONS.get(biome_name, "🌐"),
-                                            font=ctk.CTkFont(size=13))
-        self.icon_label.pack(side="left", padx=(10, 4), pady=6)
-
-        self.label = ctk.CTkLabel(self, text=biome_name, font=ctk.CTkFont(size=12, weight="bold"),
-                                   text_color=THEME["text"])
-        self.label.pack(side="left", padx=(0, 10), pady=6)
-
-        for widget in (self, self.icon_label, self.label):
-            widget.bind("<ButtonPress-1>", self._on_press)
-            widget.bind("<B1-Motion>", self._on_motion)
-            widget.bind("<ButtonRelease-1>", self._on_release)
-
-        try:
-            self.configure(cursor="hand2")
-        except Exception:
-            pass
-
-    def _on_press(self, event):
-        self.board.start_drag(self.biome_name, event)
-
-    def _on_motion(self, event):
-        self.board.update_drag(event)
-
-    def _on_release(self, event):
-        self.board.end_drag(event)
+    def dropEvent(self, event):
+        super().dropEvent(event)
+        self.board.sync_from_lists()
 
 
-class PriorityBoard(ctk.CTkFrame):
-    """
-    Trello-style tier board for assigning biome priority levels.
-    Tier 1 = highest priority; larger tier numbers are lower priority.
-    Biomes must be dragged out of "Unassigned" into a tier before they can
-    be used (enforced by the app before starting).
-    """
-    def __init__(self, master, app, **kwargs):
-        super().__init__(master, fg_color="transparent", **kwargs)
-        self.app = app  # reference to FishSniperUI for enabled biomes + callbacks
+class PriorityBoard(QtWidgets.QWidget):
+    """Trello-style tier board. Tier 1 = highest priority. Biomes must be
+    dragged out of "Unassigned" into a tier before the app will start."""
 
-        self.assignments = {}  # biome_name -> tier index (1-based); absent = unassigned
+    def __init__(self, app):
+        super().__init__()
+        self.app = app
+        self.assignments = {}   # biome -> tier index (1-based)
         self.num_tiers = 3
+        self.column_lists = {}  # key ("unassigned"/tier int) -> _BiomeList
 
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(8)
 
-        header = ctk.CTkLabel(self, text="Drag biomes between columns \u2014 Tier 1 is the highest priority.",
-                               font=ctk.CTkFont(size=12), text_color=THEME["text_dim"])
-        header.grid(row=0, column=0, sticky="w", padx=4, pady=(0, 10))
+        hint = QtWidgets.QLabel("Drag biomes between columns — Tier 1 is the highest priority.")
+        hint.setObjectName("muted")
+        outer.addWidget(hint)
 
-        self.columns_scroll = ctk.CTkScrollableFrame(self, orientation="horizontal", fg_color="transparent")
-        self.columns_scroll.grid(row=1, column=0, sticky="nsew")
+        self.scroll = QtWidgets.QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        outer.addWidget(self.scroll, 1)
 
-        self.column_widgets = {}  # key: "unassigned" or tier int -> {"frame":, "body":}
-        self.drag_ghost = None
-        self.dragging_biome = None
+        self.columns_host = QtWidgets.QWidget()
+        self.columns_layout = QtWidgets.QHBoxLayout(self.columns_host)
+        self.columns_layout.setContentsMargins(2, 2, 2, 2)
+        self.columns_layout.setSpacing(10)
+        self.columns_layout.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        self.scroll.setWidget(self.columns_host)
 
         self._build_columns()
 
-    # ---- column construction ---------------------------------------------
-    def _build_columns(self):
-        for child in self.columns_scroll.winfo_children():
-            child.destroy()
-        self.column_widgets = {}
+    def _clear_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
 
-        self._add_column_widget("unassigned", "📥 Unassigned", THEME["text_faint"], removable=False)
+    def _build_columns(self):
+        self._clear_layout(self.columns_layout)
+        self.column_lists = {}
+
+        self._add_column("unassigned", "📥 Unassigned", THEME["text_faint"], removable=False)
         for tier in range(1, self.num_tiers + 1):
             title = f"🏆 Tier {tier}" if tier == 1 else f"Tier {tier}"
             removable = (tier == self.num_tiers and self.num_tiers > 1)
-            self._add_column_widget(tier, title, tier_color(tier), removable=removable)
+            self._add_column(tier, title, tier_color(tier), removable=removable)
 
-        self._add_tier_button()
+        # "Add tier" column.
+        add_col = QtWidgets.QVBoxLayout()
+        add_btn = QtWidgets.QPushButton("+")
+        add_btn.setObjectName("ghost")
+        add_btn.setFixedSize(44, 44)
+        add_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        add_btn.clicked.connect(self.add_tier)
+        add_col.addStretch(1)
+        add_col.addWidget(add_btn, 0, QtCore.Qt.AlignHCenter)
+        add_col.addStretch(1)
+        wrap = QtWidgets.QWidget()
+        wrap.setLayout(add_col)
+        self.columns_layout.addWidget(wrap)
 
-    def _add_column_widget(self, key, title, color, removable):
-        col = ctk.CTkFrame(self.columns_scroll, width=190, fg_color=THEME["bg_alt"], corner_radius=12,
-                            border_width=1, border_color=THEME["card_border"])
-        col.pack(side="left", fill="y", padx=6, pady=2)
-        col.pack_propagate(False)
-        col.configure(height=380)
+        self.render()
 
-        header_frame = ctk.CTkFrame(col, fg_color="transparent")
-        header_frame.pack(fill="x", padx=10, pady=(10, 6))
+    def _add_column(self, key, title, color, removable):
+        col = QtWidgets.QFrame()
+        col.setObjectName("innerCard")
+        col.setFixedWidth(196)
+        v = QtWidgets.QVBoxLayout(col)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(6)
 
-        title_label = ctk.CTkLabel(header_frame, text=title, font=ctk.CTkFont(size=13, weight="bold"),
-                                    text_color=color)
-        title_label.pack(side="left")
-
+        header = QtWidgets.QHBoxLayout()
+        title_label = QtWidgets.QLabel(title)
+        title_label.setStyleSheet(f"color:{color}; font-weight:800;")
+        header.addWidget(title_label)
+        header.addStretch(1)
         if removable:
-            remove_btn = ctk.CTkButton(header_frame, text="✕", width=22, height=22, font=ctk.CTkFont(size=11),
-                                        fg_color="transparent", hover_color=THEME["danger"],
-                                        text_color=THEME["text_dim"], command=self.remove_last_tier)
-            remove_btn.pack(side="right")
+            rm = QtWidgets.QPushButton("✕")
+            rm.setObjectName("iconGhost")
+            rm.setFixedSize(22, 22)
+            rm.setCursor(QtCore.Qt.PointingHandCursor)
+            rm.clicked.connect(self.remove_last_tier)
+            header.addWidget(rm)
+        v.addLayout(header)
 
-        accent_line = ctk.CTkFrame(col, fg_color=color, height=2, corner_radius=1)
-        accent_line.pack(fill="x", padx=10, pady=(0, 8))
+        accent = QtWidgets.QFrame()
+        accent.setFixedHeight(2)
+        accent.setStyleSheet(f"background:{color}; border:none; border-radius:1px;")
+        v.addWidget(accent)
 
-        body = ctk.CTkFrame(col, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=8, pady=(0, 10))
+        lst = _BiomeList(self, key)
+        v.addWidget(lst, 1)
+        self.column_lists[key] = lst
 
-        self.column_widgets[key] = {"frame": col, "body": body}
+        self.columns_layout.addWidget(col)
 
-    def _add_tier_button(self):
-        add_col = ctk.CTkFrame(self.columns_scroll, width=60, fg_color="transparent")
-        add_col.pack(side="left", fill="y", padx=6, pady=2)
-        btn = ctk.CTkButton(add_col, text="+", width=44, height=44, corner_radius=22,
-                             font=ctk.CTkFont(size=18, weight="bold"),
-                             fg_color=THEME["card"], hover_color=THEME["card_hover"],
-                             border_width=1, border_color=THEME["card_border"],
-                             command=self.add_tier)
-        btn.pack(pady=150)
+    def _make_item(self, biome):
+        item = QtWidgets.QListWidgetItem(biome)
+        item.setData(QtCore.Qt.UserRole, biome)
+        pix = get_biome_pixmap(biome, size=18)
+        if pix is not None:
+            item.setIcon(QtGui.QIcon(pix))
+        else:
+            item.setText(f"{BIOME_ICONS.get(biome, '🌐')}  {biome}")
+        return item
+
+    def render(self):
+        for lst in self.column_lists.values():
+            lst.clear()
+        enabled = self.app.get_enabled_biomes()
+        for biome in enabled:
+            tier = self.assignments.get(biome)
+            key = tier if (tier is not None and tier in self.column_lists) else "unassigned"
+            self.column_lists[key].addItem(self._make_item(biome))
+
+    def sync_from_lists(self):
+        new_assignments = {}
+        for key, lst in self.column_lists.items():
+            for i in range(lst.count()):
+                biome = lst.item(i).data(QtCore.Qt.UserRole)
+                if key != "unassigned":
+                    new_assignments[biome] = key
+        self.assignments = new_assignments
+        self.app.on_priority_changed()
 
     def add_tier(self):
         self.num_tiers += 1
         self._build_columns()
-        self.render()
 
     def remove_last_tier(self):
         if self.num_tiers <= 1:
             return
-        removed_tier = self.num_tiers
+        removed = self.num_tiers
         for biome, tier in list(self.assignments.items()):
-            if tier == removed_tier:
+            if tier == removed:
                 del self.assignments[biome]
         self.num_tiers -= 1
         self._build_columns()
-        self.render()
 
-    # ---- rendering ---------------------------------------------------------
-    def render(self):
-        """Redraws all cards from self.assignments + the app's enabled biomes."""
-        for col in self.column_widgets.values():
-            for child in col["body"].winfo_children():
-                child.destroy()
-
-        enabled = self.app.get_enabled_biomes()
-        for biome in enabled:
-            tier = self.assignments.get(biome)
-            key = tier if (tier is not None and tier in self.column_widgets) else "unassigned"
-            card = BiomeCard(self.column_widgets[key]["body"], biome, self)
-            card.pack(fill="x", pady=3)
-
-    # ---- drag and drop -------------------------------------------------------
-    def start_drag(self, biome_name, event):
-        self.dragging_biome = biome_name
-        if self.drag_ghost is not None:
-            try:
-                self.drag_ghost.destroy()
-            except Exception:
-                pass
-
-        ghost = ctk.CTkToplevel(self)
-        ghost.overrideredirect(True)
-        try:
-            ghost.attributes("-topmost", True)
-        except Exception:
-            pass
-        try:
-            ghost.attributes("-alpha", 0.88)
-        except Exception:
-            pass
-
-        icon = BIOME_ICONS.get(biome_name, "🌐")
-        thumb = get_biome_ctk_image(biome_name, size=(16, 16))
-        if thumb:
-            lbl = ctk.CTkLabel(ghost, text=f"  {biome_name}", image=thumb, compound="left",
-                                fg_color=THEME["accent"], text_color="#0b0f14", corner_radius=8,
-                                font=ctk.CTkFont(size=12, weight="bold"))
-        else:
-            lbl = ctk.CTkLabel(ghost, text=f"{icon}  {biome_name}", fg_color=THEME["accent"],
-                                text_color="#0b0f14", corner_radius=8, font=ctk.CTkFont(size=12, weight="bold"))
-        lbl.pack(ipadx=10, ipady=6)
-        ghost.geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
-        self.drag_ghost = ghost
-
-    def update_drag(self, event):
-        if self.drag_ghost is not None:
-            try:
-                self.drag_ghost.geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
-            except Exception:
-                pass
-
-    def end_drag(self, event):
-        if self.drag_ghost is not None:
-            try:
-                self.drag_ghost.destroy()
-            except Exception:
-                pass
-            self.drag_ghost = None
-
-        if not self.dragging_biome:
-            return
-
-        target_key = None
-        for key, col in self.column_widgets.items():
-            frame = col["frame"]
-            try:
-                x1, y1 = frame.winfo_rootx(), frame.winfo_rooty()
-                x2, y2 = x1 + frame.winfo_width(), y1 + frame.winfo_height()
-            except Exception:
-                continue
-            if x1 <= event.x_root <= x2 and y1 <= event.y_root <= y2:
-                target_key = key
-                break
-
-        if target_key is not None:
-            if target_key == "unassigned":
-                self.assignments.pop(self.dragging_biome, None)
-            else:
-                self.assignments[self.dragging_biome] = target_key
-
-        self.dragging_biome = None
-        self.render()
-        self.app.on_priority_changed()
-
-    # ---- data access ---------------------------------------------------------
     def get_unassigned(self):
         enabled = self.app.get_enabled_biomes()
         return [b for b in enabled if b not in self.assignments]
@@ -501,7 +613,6 @@ class PriorityBoard(ctk.CTkFrame):
         self.num_tiers = max(1, num_tiers or 1)
         self.assignments = {b: t for b, t in self.assignments.items() if 1 <= t <= self.num_tiers}
         self._build_columns()
-        self.render()
 
     def seed_defaults(self):
         for tier_idx, biomes in enumerate(DEFAULT_TIER_SEED, start=1):
@@ -511,139 +622,62 @@ class PriorityBoard(ctk.CTkFrame):
         self._build_columns()
 
 
-class FishSniperUI(ctk.CTk):
+NAV_ITEMS = [
+    ("dashboard", "📋 Dashboard"),
+    ("settings", "⚙️ Settings"),
+    ("biomes", "🌍 Biomes"),
+    ("priority", "🏆 Priority"),
+    ("servers", "💬 Servers"),
+    ("shop", "🛒 Shop"),
+    ("auto_item", "🧪 Auto Item"),
+    ("gauntlet", "🥊 Gauntlet"),
+]
+
+
+class FishSniperUI(QtWidgets.QMainWindow):
+    # Queued signal used to run a callable on the GUI thread (see .after()).
+    _invoke = QtCore.Signal(object)
+
     def __init__(self):
         super().__init__()
+        self._loading = False
+        self.is_running = False
+        self._registered_hotkey_handles = []
 
-        ctk.set_appearance_mode("dark")
+        self.setWindowTitle("FishSniper")
+        self.resize(1120, 820)
+        self.setMinimumSize(940, 640)
 
-        self.title("FishSniper")
-        self.geometry("1080x780")
-        self.configure(fg_color=THEME["bg"])
+        # GUI-thread marshaling: any thread can call self.after(0, fn).
+        self._invoke.connect(self._run_on_ui)
 
-        # Link global instances
+        # Link global instances.
         scanner.fish_loop = fish_loop
         fish_loop.set_path_change_callback(self._on_active_path_changed)
         fish_loop.set_failsafe_callback(self._on_fishing_failsafe)
         fish_loop.set_buy_callback(self._on_item_purchased)
         fish_loop.set_session_end_callback(scanner.handle_fish_loop_session_ending)
+        fish_loop.set_gauntlet_swap_finished_callback(scanner.handle_gauntlet_swap_finished)
         scanner.set_biome_time_updated_callback(self._on_biome_time_updated)
 
-        # Configure Grid Layout
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        root = AnimatedBackground()
+        self.setCentralWidget(root)
+        h = QtWidgets.QHBoxLayout(root)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(0)
+        h.addWidget(self._build_sidebar())
+        h.addWidget(self._build_content(), 1)
 
-        # Fonts
-        self.title_font = ctk.CTkFont(family="Helvetica", size=20, weight="bold")
-        self.heading_font = ctk.CTkFont(family="Helvetica", size=14, weight="bold")
-        self.normal_font = ctk.CTkFont(family="Helvetica", size=12)
-        self.small_font = ctk.CTkFont(family="Helvetica", size=10)
+        # Log emitter (stdout/stderr redirect).
+        self._log_emitter = _LogEmitter()
+        self._log_emitter.line.connect(self._append_log)
+        sys.stdout = DualLogger(self._log_emitter, sys.__stdout__)
+        sys.stderr = DualLogger(self._log_emitter, sys.__stderr__)
 
-        # --- SIDEBAR (Column 0) ---
-        self.sidebar_frame = ctk.CTkFrame(self, width=240, corner_radius=0, fg_color=THEME["bg_alt"])
-        self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
-        self.sidebar_frame.grid_propagate(False)
-        self.sidebar_frame.grid_rowconfigure(9, weight=1)
+        self._go("dashboard")
 
-        logo_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
-        logo_frame.grid(row=0, column=0, padx=20, pady=(24, 20), sticky="w")
-        ctk.CTkLabel(logo_frame, text="🎣", font=ctk.CTkFont(size=26)).pack(side="left", padx=(0, 8))
-        ctk.CTkLabel(logo_frame, text="FishSniper", font=self.title_font, text_color=THEME["text"]).pack(side="left")
-
-        self.universal_button = ctk.CTkButton(
-            self.sidebar_frame, text="▶  Start FishSniper", font=self.heading_font,
-            command=self.toggle_universal, fg_color=THEME["success"], hover_color=THEME["success_hover"],
-            height=42, corner_radius=10)
-        self.universal_button.grid(row=1, column=0, padx=20, pady=(0, 10), sticky="ew")
-
-        self.status_pill = StatusPill(self.sidebar_frame)
-        self.status_pill.grid(row=2, column=0, padx=20, pady=(0, 20), sticky="ew")
-
-        self.active_path_label = ctk.CTkLabel(
-            self.sidebar_frame, text="Active Path: Path 1", font=self.small_font,
-            text_color=THEME["accent"], anchor="w",
-        )
-        self.active_path_label.grid(row=3, column=0, padx=20, pady=(0, 10), sticky="ew")
-
-        quick_card = ctk.CTkFrame(self.sidebar_frame, fg_color=THEME["card"], corner_radius=12,
-                                   border_width=1, border_color=THEME["card_border"])
-        quick_card.grid(row=4, column=0, padx=20, pady=(0, 16), sticky="ew")
-
-        ctk.CTkLabel(quick_card, text="FISHING SETUP", font=ctk.CTkFont(size=10, weight="bold"),
-                     text_color=THEME["text_faint"]).pack(anchor="w", padx=14, pady=(12, 6))
-
-        self._sidebar_field_label(quick_card, "Screen Resolution")
-        self.res_dropdown = ctk.CTkOptionMenu(quick_card, values=["1080p", "1440p", "1366x768"],
-                                               command=self.save_settings, fg_color=THEME["bg_alt"],
-                                               button_color=THEME["accent"], button_hover_color=THEME["accent_hover"],
-                                               dropdown_fg_color=THEME["card"])
-        self.res_dropdown.pack(fill="x", padx=14, pady=(0, 10))
-
-        self._sidebar_field_label(quick_card, "Pathing Mode")
-        self.speed_dropdown = ctk.CTkOptionMenu(quick_card, values=["Vip Pathing", "Non Vip Pathing"],
-                                                 command=self.save_settings, fg_color=THEME["bg_alt"],
-                                                 button_color=THEME["accent"],
-                                                 button_hover_color=THEME["accent_hover"],
-                                                 dropdown_fg_color=THEME["card"])
-        self.speed_dropdown.pack(fill="x", padx=14, pady=(0, 10))
-
-        self._sidebar_field_label(quick_card, "Starting Path")
-        self.path_dropdown = ctk.CTkOptionMenu(
-            quick_card, values=[f"Path {number}" for number in range(1, 13)],
-            command=self.on_path_selection, fg_color=THEME["bg_alt"],
-            button_color=THEME["accent"], button_hover_color=THEME["accent_hover"],
-            dropdown_fg_color=THEME["card"],
-        )
-        self.path_dropdown.set("Path 1")
-        self.path_dropdown.pack(fill="x", padx=14, pady=(0, 10))
-
-        self._sidebar_field_label(quick_card, "Max Fish")
-        self.max_catches_entry = ctk.CTkEntry(quick_card, placeholder_text="1", fg_color=THEME["bg_alt"],
-                                               border_color=THEME["card_border"])
-        self.max_catches_entry.pack(fill="x", padx=14, pady=(0, 10))
-        self.max_catches_entry.insert(0, "1")
-
-        self._sidebar_field_label(quick_card, "Sell Loops (56 = all)")
-        self.sell_loops_entry = ctk.CTkEntry(quick_card, placeholder_text="56", fg_color=THEME["bg_alt"],
-                                              border_color=THEME["card_border"])
-        self.sell_loops_entry.pack(fill="x", padx=14, pady=(0, 14))
-        self.sell_loops_entry.insert(0, "56")
-
-        self.save_bottom = ctk.CTkButton(self.sidebar_frame, text="💾  Save Settings", command=self.save_settings,
-                                          fg_color=THEME["accent2"], hover_color=THEME["accent2_hover"],
-                                          height=38, corner_radius=10)
-        self.save_bottom.grid(row=10, column=0, padx=20, pady=(0, 20), sticky="sew")
-
-        # --- MAIN AREA (Column 1) ---
-        self.tabview = ctk.CTkTabview(self, fg_color=THEME["bg"], segmented_button_fg_color=THEME["bg_alt"],
-                                       segmented_button_selected_color=THEME["accent"],
-                                       segmented_button_selected_hover_color=THEME["accent_hover"],
-                                       segmented_button_unselected_color=THEME["bg_alt"],
-                                       text_color=THEME["text"])
-        self.tabview.grid(row=0, column=1, padx=(16, 20), pady=20, sticky="nsew")
-
-        self.tab_dash = self.tabview.add("📋 Dashboard")
-        self.tab_auth = self.tabview.add("⚙️ Settings")
-        self.tab_biomes = self.tabview.add("🌍 Biomes")
-        self.tab_priority = self.tabview.add("🏆 Priority")
-        self.tab_servers = self.tabview.add("💬 Servers")
-        self.tab_shop = self.tabview.add("🛒 Shop")
-
-        self._build_dashboard_tab()
-        self._build_settings_tab()
-        self._build_biomes_tab()
-        self._build_priority_tab()
-        self._build_servers_tab()
-        self._build_shop_tab()
-
-        # Thumbnails are fetched over the network, so load them in the
-        # background and swap them in once each one lands rather than
-        # blocking startup on 13 HTTP requests.
+        # Load thumbnails in the background.
         threading.Thread(target=self._preload_thumbnails, daemon=True).start()
-
-        # --- INITIALIZATION ---
-        self.is_running = False
-        self._registered_hotkey_handles = []
 
         self.load_settings()
         self.initialize_scanner()
@@ -652,193 +686,375 @@ class FishSniperUI(ctk.CTk):
         threading.Thread(target=scanner.start_scanner, daemon=True).start()
 
     # ------------------------------------------------------------------
-    # Small layout helpers
+    # GUI-thread marshaling (drop-in replacement for tk's widget.after)
     # ------------------------------------------------------------------
-    def _sidebar_field_label(self, parent, text):
-        ctk.CTkLabel(parent, text=text, font=self.small_font, text_color=THEME["text_dim"]).pack(
-            anchor="w", padx=14, pady=(0, 3))
+    def after(self, ms, fn=None):
+        if fn is None:
+            return
+        if ms and ms > 0:
+            self._invoke.emit(lambda: QtCore.QTimer.singleShot(int(ms), fn))
+        else:
+            self._invoke.emit(fn)
 
-    def _credential_field(self, card, index, label_text, placeholder, last=False):
-        pady_top = 16 if index == 0 else 14
-        ctk.CTkLabel(card, text=label_text, font=self.normal_font, text_color=THEME["text_dim"]).grid(
-            row=index * 2, column=0, padx=16, pady=(pady_top, 4), sticky="w")
-        entry = ctk.CTkEntry(card, placeholder_text=placeholder, fg_color=THEME["bg_alt"],
-                              border_color=THEME["card_border"], height=34)
-        entry.grid(row=index * 2 + 1, column=0, padx=16, pady=(0, 16 if last else 4), sticky="ew")
-        return entry
-
-    def _webhook_field(self, card, index, label_text, placeholder, last=False):
-        """Like _credential_field, but pairs the entry with a Test button so
-        the user can verify the webhook URL actually works."""
-        pady_top = 16 if index == 0 else 14
-        ctk.CTkLabel(card, text=label_text, font=self.normal_font, text_color=THEME["text_dim"]).grid(
-            row=index * 2, column=0, columnspan=2, padx=16, pady=(pady_top, 4), sticky="w")
-
-        row_frame = ctk.CTkFrame(card, fg_color="transparent")
-        row_frame.grid(row=index * 2 + 1, column=0, columnspan=2, padx=16, pady=(0, 16 if last else 4),
-                        sticky="ew")
-        row_frame.grid_columnconfigure(0, weight=1)
-
-        entry = ctk.CTkEntry(row_frame, placeholder_text=placeholder, fg_color=THEME["bg_alt"],
-                              border_color=THEME["card_border"], height=34)
-        entry.grid(row=0, column=0, sticky="ew")
-
-        test_btn = ctk.CTkButton(row_frame, text="Test", width=64, height=34, command=self.test_webhook,
-                                  fg_color=THEME["accent2"], hover_color=THEME["accent2_hover"])
-        test_btn.grid(row=0, column=1, padx=(8, 0))
-
-        return entry, test_btn
-
-    def _server_field(self, parent, placeholder, last=False):
-        entry = ctk.CTkEntry(parent, placeholder_text=placeholder, fg_color=THEME["bg_alt"],
-                              border_color=THEME["card_border"], height=28)
-        entry.pack(fill="x", padx=12, pady=(8, 14 if last else 0))
-        return entry
+    def _run_on_ui(self, fn):
+        try:
+            fn()
+        except Exception as e:
+            print(f"[UI] Error in marshaled callback: {e}")
 
     # ------------------------------------------------------------------
-    # Tab builders
+    # Small builder helpers
     # ------------------------------------------------------------------
-    def _build_dashboard_tab(self):
-        self.tab_dash.grid_columnconfigure(0, weight=1)
-        self.tab_dash.grid_rowconfigure(1, weight=1)
+    def _card(self):
+        card = QtWidgets.QFrame()
+        card.setObjectName("card")
+        shadow = QtWidgets.QGraphicsDropShadowEffect(card)
+        shadow.setBlurRadius(34)
+        shadow.setColor(QtGui.QColor(0, 0, 0, 150))
+        shadow.setOffset(0, 6)
+        card.setGraphicsEffect(shadow)
+        return card
 
-        ctk.CTkLabel(self.tab_dash, text="Application Logs", font=self.heading_font,
-                     text_color=THEME["text"]).grid(row=0, column=0, padx=4, pady=(6, 10), sticky="w")
+    def _heading(self, text):
+        lbl = QtWidgets.QLabel(text)
+        lbl.setObjectName("heading")
+        return lbl
 
-        self.log_textbox = ctk.CTkTextbox(self.tab_dash, font=ctk.CTkFont(family="Consolas", size=12),
-                                           state="disabled", fg_color=THEME["bg_alt"], border_width=1,
-                                           border_color=THEME["card_border"], corner_radius=10)
-        self.log_textbox.grid(row=1, column=0, padx=4, pady=(0, 6), sticky="nsew")
+    def _muted(self, text, wrap=False):
+        lbl = QtWidgets.QLabel(text)
+        lbl.setObjectName("muted")
+        if wrap:
+            lbl.setWordWrap(True)
+        return lbl
 
-        # Redirect stdout/stderr to the textbox
-        sys.stdout = DualLogger(self.log_textbox, sys.stdout)
-        sys.stderr = DualLogger(self.log_textbox, sys.stderr)
+    def _faint(self, text, wrap=False):
+        lbl = QtWidgets.QLabel(text)
+        lbl.setObjectName("faint")
+        if wrap:
+            lbl.setWordWrap(True)
+        return lbl
 
-    def _build_settings_tab(self):
-        self.tab_auth.grid_columnconfigure(0, weight=1)
-        self.tab_auth.grid_rowconfigure(0, weight=1)
+    def _line_edit(self, placeholder="", text=""):
+        e = QtWidgets.QLineEdit()
+        if placeholder:
+            e.setPlaceholderText(placeholder)
+        if text:
+            e.setText(text)
+        return e
 
-        self.scroll_settings = ctk.CTkScrollableFrame(self.tab_auth, fg_color="transparent")
-        self.scroll_settings.grid(row=0, column=0, padx=2, pady=(0, 10), sticky="nsew")
-        self.scroll_settings.grid_columnconfigure(0, weight=1)
+    def _combo(self, values):
+        c = QtWidgets.QComboBox()
+        c.addItems(values)
+        c.setCursor(QtCore.Qt.PointingHandCursor)
+        return c
 
-        ctk.CTkLabel(self.scroll_settings, text="Credentials & Integrations", font=self.heading_font,
-                     text_color=THEME["text"]).grid(row=0, column=0, padx=4, pady=(6, 14), sticky="w")
+    def _scroll_page(self):
+        """Returns (page_widget, content_layout) where content lives in a
+        vertical scroll area."""
+        page = QtWidgets.QWidget()
+        pv = QtWidgets.QVBoxLayout(page)
+        pv.setContentsMargins(0, 0, 0, 0)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QtWidgets.QWidget()
+        cl = QtWidgets.QVBoxLayout(content)
+        cl.setContentsMargins(2, 2, 8, 2)
+        cl.setSpacing(10)
+        scroll.setWidget(content)
+        pv.addWidget(scroll)
+        return page, cl
 
-        card = ctk.CTkFrame(self.scroll_settings, fg_color=THEME["card"], corner_radius=12, border_width=1,
-                             border_color=THEME["card_border"])
-        card.grid(row=1, column=0, padx=4, pady=(0, 10), sticky="ew")
-        card.grid_columnconfigure(0, weight=1)
+    # ------------------------------------------------------------------
+    # Chrome: sidebar + content
+    # ------------------------------------------------------------------
+    def _build_sidebar(self):
+        bar = QtWidgets.QFrame()
+        bar.setObjectName("sidebar")
+        bar.setFixedWidth(232)
+        v = QtWidgets.QVBoxLayout(bar)
+        v.setContentsMargins(16, 20, 16, 16)
+        v.setSpacing(8)
 
-        self.rb_token_entry = self._credential_field(card, 0, "🎮 Roblox Cookie (.ROBLOSECURITY)",
-                                                       "Enter Roblox Cookie")
-        self.ds_token_entry = self._credential_field(card, 1, "💬 Discord User Token", "Enter Discord Token")
-        self.ds_webhook_entry, self.webhook_test_btn = self._webhook_field(
-            card, 2, "🔔 Discord Webhook URL (Optional)", "Enter Discord Webhook URL")
-        self.ds_ping_user_id_entry = self._credential_field(
-            card, 3, "📣 Discord User ID to Ping (Optional)",
-            "Pinged on Glitched / Dreamspace / Cyberspace joins", last=True)
+        brand = QtWidgets.QHBoxLayout()
+        logo = QtWidgets.QLabel("🎣")
+        logo.setStyleSheet("font-size: 26px;")
+        text_col = QtWidgets.QVBoxLayout()
+        text_col.setSpacing(0)
+        name = QtWidgets.QLabel("FishSniper")
+        name.setObjectName("brand")
+        sub = QtWidgets.QLabel("AUTO FISHER")
+        sub.setObjectName("brandSub")
+        text_col.addWidget(name)
+        text_col.addWidget(sub)
+        brand.addWidget(logo)
+        brand.addSpacing(8)
+        brand.addLayout(text_col)
+        brand.addStretch(1)
+        v.addLayout(brand)
+        v.addSpacing(14)
 
-        ctk.CTkLabel(self.scroll_settings, text="Fishing Behavior", font=self.heading_font,
-                     text_color=THEME["text"]).grid(row=2, column=0, padx=4, pady=(14, 10), sticky="w")
+        self.universal_button = QtWidgets.QPushButton("▶  Start FishSniper")
+        self.universal_button.setObjectName("start")
+        self.universal_button.setMinimumHeight(42)
+        self.universal_button.setCursor(QtCore.Qt.PointingHandCursor)
+        self.universal_button.clicked.connect(self.toggle_universal)
+        v.addWidget(self.universal_button)
 
-        behavior_card = ctk.CTkFrame(self.scroll_settings, fg_color=THEME["card"], corner_radius=12,
-                                      border_width=1, border_color=THEME["card_border"])
-        behavior_card.grid(row=3, column=0, padx=4, pady=(0, 10), sticky="ew")
-        behavior_card.grid_columnconfigure(0, weight=1)
+        self.status_pill = StatusPill()
+        v.addWidget(self.status_pill)
 
-        self.sell_on_start_switch = ctk.CTkSwitch(
-            behavior_card, text="💰 Sell inventory when FishSniper starts", font=self.normal_font,
-            progress_color=THEME["accent"], text_color=THEME["text"])
-        self.sell_on_start_switch.select()  # enabled by default
-        self.sell_on_start_switch.grid(row=0, column=0, padx=16, pady=(16, 4), sticky="w")
+        self.active_path_label = QtWidgets.QLabel("Active Path: Path 1")
+        self.active_path_label.setObjectName("activePath")
+        v.addWidget(self.active_path_label)
+        v.addSpacing(10)
 
-        ctk.CTkLabel(
-            behavior_card,
-            text="Sells off any existing inventory on the first server joined after pressing Start, "
-                 "before fishing begins. Later server joins in the same run are unaffected.",
-            font=self.small_font, text_color=THEME["text_dim"], wraplength=600, justify="left",
-        ).grid(row=1, column=0, padx=16, pady=(0, 16), sticky="w")
+        self.nav = {}
+        for key, label in NAV_ITEMS:
+            b = QtWidgets.QPushButton(label)
+            b.setObjectName("nav")
+            b.setCheckable(True)
+            b.setCursor(QtCore.Qt.PointingHandCursor)
+            b.clicked.connect(lambda _=False, k=key: self._go(k))
+            self.nav[key] = b
+            v.addWidget(b)
 
-        afk_row = ctk.CTkFrame(behavior_card, fg_color="transparent")
-        afk_row.grid(row=2, column=0, padx=16, pady=(0, 6), sticky="w")
-        ctk.CTkLabel(afk_row, text="🕹️ Anti-AFK interval while not fishing (sec):",
-                     font=self.normal_font, text_color=THEME["text"]).pack(side="left")
-        self.anti_afk_interval_entry = ctk.CTkEntry(afk_row, width=70, height=28, font=self.normal_font,
-                                                      fg_color=THEME["bg_alt"], border_color=THEME["card_border"])
-        self.anti_afk_interval_entry.insert(0, "300")
-        self.anti_afk_interval_entry.pack(side="left", padx=(10, 0))
+        v.addStretch(1)
 
-        ctk.CTkLabel(
-            behavior_card,
-            text="How often the bot focuses the window and presses space while sitting in a biome "
-                 "that has fishing turned off (see the Biomes tab). Default is 300 seconds (5 minutes).",
-            font=self.small_font, text_color=THEME["text_dim"], wraplength=600, justify="left",
-        ).grid(row=3, column=0, padx=16, pady=(0, 16), sticky="w")
+        self.save_bottom = QtWidgets.QPushButton("💾  Save Settings")
+        self.save_bottom.setObjectName("ghost")
+        self.save_bottom.setMinimumHeight(38)
+        self.save_bottom.setCursor(QtCore.Qt.PointingHandCursor)
+        self.save_bottom.clicked.connect(lambda: self.save_settings())
+        v.addWidget(self.save_bottom)
+        return bar
 
-        ctk.CTkLabel(self.scroll_settings, text="Hotkeys", font=self.heading_font,
-                     text_color=THEME["text"]).grid(row=4, column=0, padx=4, pady=(14, 10), sticky="w")
+    def _build_content(self):
+        wrap = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(wrap)
+        v.setContentsMargins(22, 18, 22, 18)
+        v.setSpacing(14)
 
-        hotkey_card = ctk.CTkFrame(self.scroll_settings, fg_color=THEME["card"], corner_radius=12,
-                                    border_width=1, border_color=THEME["card_border"])
-        hotkey_card.grid(row=5, column=0, padx=4, pady=(0, 10), sticky="ew")
-        hotkey_card.grid_columnconfigure(0, weight=1)
+        header = QtWidgets.QHBoxLayout()
+        self.page_title = QtWidgets.QLabel("Dashboard")
+        self.page_title.setObjectName("pageTitle")
+        header.addWidget(self.page_title)
+        header.addStretch(1)
+        v.addLayout(header)
 
-        start_hotkey_row = ctk.CTkFrame(hotkey_card, fg_color="transparent")
-        start_hotkey_row.grid(row=0, column=0, padx=16, pady=(16, 6), sticky="w")
-        ctk.CTkLabel(start_hotkey_row, text="Start hotkey:", font=self.normal_font,
-                     text_color=THEME["text"]).pack(side="left")
-        self.start_hotkey_entry = ctk.CTkEntry(start_hotkey_row, width=100, height=28, font=self.normal_font,
-                                                fg_color=THEME["bg_alt"], border_color=THEME["card_border"])
-        self.start_hotkey_entry.insert(0, DEFAULT_START_HOTKEY)
-        self.start_hotkey_entry.pack(side="left", padx=(10, 0))
+        self.stack = QtWidgets.QStackedWidget()
+        self.pages = {
+            "dashboard": self._build_dashboard_page(),
+            "settings": self._build_settings_page(),
+            "biomes": self._build_biomes_page(),
+            "priority": self._build_priority_page(),
+            "servers": self._build_servers_page(),
+            "shop": self._build_shop_page(),
+            "auto_item": self._build_auto_item_page(),
+            "gauntlet": self._build_gauntlet_page(),
+        }
+        for key, _ in NAV_ITEMS:
+            self.stack.addWidget(self.pages[key])
+        v.addWidget(self.stack, 1)
+        return wrap
 
-        stop_hotkey_row = ctk.CTkFrame(hotkey_card, fg_color="transparent")
-        stop_hotkey_row.grid(row=1, column=0, padx=16, pady=(0, 6), sticky="w")
-        ctk.CTkLabel(stop_hotkey_row, text="Stop hotkey: ", font=self.normal_font,
-                     text_color=THEME["text"]).pack(side="left")
-        self.stop_hotkey_entry = ctk.CTkEntry(stop_hotkey_row, width=100, height=28, font=self.normal_font,
-                                               fg_color=THEME["bg_alt"], border_color=THEME["card_border"])
-        self.stop_hotkey_entry.insert(0, DEFAULT_STOP_HOTKEY)
-        self.stop_hotkey_entry.pack(side="left", padx=(10, 0))
+    def _go(self, key):
+        for k, b in self.nav.items():
+            b.setChecked(k == key)
+        self.stack.setCurrentWidget(self.pages[key])
+        self.page_title.setText(dict(NAV_ITEMS)[key].split(" ", 1)[-1])
 
-        self.hotkey_status_label = ctk.CTkLabel(
-            hotkey_card, text="", font=self.small_font, text_color=THEME["text_faint"],
-            wraplength=600, justify="left",
-        )
-        self.hotkey_status_label.grid(row=2, column=0, padx=16, pady=(0, 6), sticky="w")
+    # ------------------------------------------------------------------
+    # Dashboard page (quick setup + logs)
+    # ------------------------------------------------------------------
+    def _build_dashboard_page(self):
+        page = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(14)
 
-        ctk.CTkLabel(
-            hotkey_card,
-            text="Work globally, even while Roblox is focused. Use names like 'f1' or combos like "
-                 "'ctrl+alt+s'. Applies immediately and is saved with your other settings.",
-            font=self.small_font, text_color=THEME["text_dim"], wraplength=600, justify="left",
-        ).grid(row=3, column=0, padx=16, pady=(0, 16), sticky="w")
+        setup = self._card()
+        sv = QtWidgets.QVBoxLayout(setup)
+        sv.setContentsMargins(20, 16, 20, 16)
+        sv.setSpacing(8)
+        sv.addWidget(self._faint("FISHING SETUP"))
 
-        for entry in (self.start_hotkey_entry, self.stop_hotkey_entry):
-            entry.bind("<Return>", lambda e: self.apply_hotkeys())
-            entry.bind("<FocusOut>", lambda e: self.apply_hotkeys())
+        grid = QtWidgets.QGridLayout()
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(8)
 
-    def _build_biomes_tab(self):
-        self.tab_biomes.grid_columnconfigure(0, weight=1)
-        self.tab_biomes.grid_rowconfigure(1, weight=1)
+        grid.addWidget(self._muted("Screen Resolution"), 0, 0)
+        self.res_dropdown = self._combo(["1080p", "1440p", "1366x768"])
+        self.res_dropdown.currentTextChanged.connect(lambda _v: self.save_settings())
+        grid.addWidget(self.res_dropdown, 1, 0)
 
-        header_row = ctk.CTkFrame(self.tab_biomes, fg_color="transparent")
-        header_row.grid(row=0, column=0, padx=4, pady=(6, 10), sticky="ew")
-        header_row.grid_columnconfigure(0, weight=1)
+        grid.addWidget(self._muted("Pathing Mode"), 0, 1)
+        self.speed_dropdown = self._combo(["Vip Pathing", "Non Vip Pathing"])
+        self.speed_dropdown.currentTextChanged.connect(lambda _v: self.save_settings())
+        grid.addWidget(self.speed_dropdown, 1, 1)
 
-        ctk.CTkLabel(header_row, text="Select Biomes to Hunt", font=self.heading_font,
-                     text_color=THEME["text"]).grid(row=0, column=0, sticky="w")
+        grid.addWidget(self._muted("Starting Path"), 0, 2)
+        self.path_dropdown = self._combo([f"Path {n}" for n in range(1, 13)])
+        self.path_dropdown.currentTextChanged.connect(self.on_path_selection)
+        grid.addWidget(self.path_dropdown, 1, 2)
 
-        reset_time_btn = ctk.CTkButton(header_row, text="Reset All Biome Times", width=170, height=28,
-                                        font=self.small_font, fg_color=THEME["danger"],
-                                        hover_color=THEME["danger_hover"], command=self.reset_all_biome_times)
-        reset_time_btn.grid(row=0, column=1, sticky="e")
+        grid.addWidget(self._muted("Max Fish"), 2, 0)
+        self.max_catches_entry = self._line_edit("1", "1")
+        self.max_catches_entry.editingFinished.connect(lambda: self.save_settings())
+        grid.addWidget(self.max_catches_entry, 3, 0)
 
-        self.scroll_biomes = ctk.CTkScrollableFrame(self.tab_biomes, fg_color="transparent")
-        self.scroll_biomes.grid(row=1, column=0, padx=2, pady=(0, 10), sticky="nsew")
-        for col in range(3):
-            self.scroll_biomes.grid_columnconfigure(col, weight=1)
+        grid.addWidget(self._muted("Sell Loops (56 = all)"), 2, 1)
+        self.sell_loops_entry = self._line_edit("56", "56")
+        self.sell_loops_entry.editingFinished.connect(lambda: self.save_settings())
+        grid.addWidget(self.sell_loops_entry, 3, 1)
+        grid.setColumnStretch(2, 1)
+
+        sv.addLayout(grid)
+        v.addWidget(setup)
+
+        logs = self._card()
+        lv = QtWidgets.QVBoxLayout(logs)
+        lv.setContentsMargins(20, 16, 20, 16)
+        lv.setSpacing(8)
+        lv.addWidget(self._heading("Application Logs"))
+        self.log_view = QtWidgets.QTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setLineWrapMode(QtWidgets.QTextEdit.NoWrap)
+        self.log_view.setStyleSheet('font-family: "Cascadia Mono","Consolas",monospace; font-size: 12px;')
+        lv.addWidget(self.log_view, 1)
+        v.addWidget(logs, 1)
+        return page
+
+    def _append_log(self, text, color):
+        self.log_view.moveCursor(QtGui.QTextCursor.End)
+        safe = escape(text).replace(" ", "&nbsp;")
+        self.log_view.insertHtml(f'<span style="color:{color};">{safe}</span><br>')
+        self.log_view.moveCursor(QtGui.QTextCursor.End)
+
+    # ------------------------------------------------------------------
+    # Settings page
+    # ------------------------------------------------------------------
+    def _build_settings_page(self):
+        page, cl = self._scroll_page()
+
+        cl.addWidget(self._heading("Credentials & Integrations"))
+        cred = self._card()
+        cv = QtWidgets.QVBoxLayout(cred)
+        cv.setContentsMargins(18, 16, 18, 16)
+        cv.setSpacing(6)
+
+        cv.addWidget(self._muted("🎮 Roblox Cookie (.ROBLOSECURITY)"))
+        self.rb_token_entry = self._line_edit("Enter Roblox Cookie")
+        self.rb_token_entry.setEchoMode(QtWidgets.QLineEdit.Password)
+        cv.addWidget(self.rb_token_entry)
+
+        cv.addWidget(self._muted("💬 Discord User Token"))
+        self.ds_token_entry = self._line_edit("Enter Discord Token")
+        self.ds_token_entry.setEchoMode(QtWidgets.QLineEdit.Password)
+        cv.addWidget(self.ds_token_entry)
+
+        cv.addWidget(self._muted("🔔 Discord Webhook URL (Optional)"))
+        wh_row = QtWidgets.QHBoxLayout()
+        self.ds_webhook_entry = self._line_edit("Enter Discord Webhook URL")
+        wh_row.addWidget(self.ds_webhook_entry, 1)
+        self.webhook_test_btn = QtWidgets.QPushButton("Test")
+        self.webhook_test_btn.setObjectName("ghost")
+        self.webhook_test_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.webhook_test_btn.clicked.connect(self.test_webhook)
+        wh_row.addWidget(self.webhook_test_btn)
+        cv.addLayout(wh_row)
+
+        cv.addWidget(self._muted("📣 Discord User ID to Ping (Optional)"))
+        self.ds_ping_user_id_entry = self._line_edit(
+            "Pinged on Glitched / Dreamspace / Cyberspace joins")
+        cv.addWidget(self.ds_ping_user_id_entry)
+        cl.addWidget(cred)
+
+        cl.addWidget(self._heading("Fishing Behavior"))
+        beh = self._card()
+        bv = QtWidgets.QVBoxLayout(beh)
+        bv.setContentsMargins(18, 16, 18, 16)
+        bv.setSpacing(6)
+        self.sell_on_start_switch = QtWidgets.QCheckBox("💰 Sell inventory when FishSniper starts")
+        self.sell_on_start_switch.setChecked(True)
+        bv.addWidget(self.sell_on_start_switch)
+        bv.addWidget(self._faint(
+            "Sells off any existing inventory on the first server joined after pressing Start, "
+            "before fishing begins. Later server joins in the same run are unaffected.", wrap=True))
+
+        afk_row = QtWidgets.QHBoxLayout()
+        afk_row.addWidget(QtWidgets.QLabel("🕹️ Anti-AFK interval while not fishing (sec):"))
+        self.anti_afk_interval_entry = self._line_edit("300", "300")
+        self.anti_afk_interval_entry.setFixedWidth(80)
+        afk_row.addWidget(self.anti_afk_interval_entry)
+        afk_row.addStretch(1)
+        bv.addLayout(afk_row)
+        bv.addWidget(self._faint(
+            "How often the bot focuses the window and presses space while sitting in a biome that "
+            "has fishing turned off (see the Biomes tab). Default is 300 seconds (5 minutes).", wrap=True))
+        cl.addWidget(beh)
+
+        cl.addWidget(self._heading("Hotkeys"))
+        hk = self._card()
+        hv = QtWidgets.QVBoxLayout(hk)
+        hv.setContentsMargins(18, 16, 18, 16)
+        hv.setSpacing(6)
+
+        s_row = QtWidgets.QHBoxLayout()
+        s_row.addWidget(QtWidgets.QLabel("Start hotkey:"))
+        self.start_hotkey_entry = self._line_edit("", DEFAULT_START_HOTKEY)
+        self.start_hotkey_entry.setFixedWidth(120)
+        self.start_hotkey_entry.editingFinished.connect(self.apply_hotkeys)
+        s_row.addWidget(self.start_hotkey_entry)
+        s_row.addStretch(1)
+        hv.addLayout(s_row)
+
+        t_row = QtWidgets.QHBoxLayout()
+        t_row.addWidget(QtWidgets.QLabel("Stop hotkey: "))
+        self.stop_hotkey_entry = self._line_edit("", DEFAULT_STOP_HOTKEY)
+        self.stop_hotkey_entry.setFixedWidth(120)
+        self.stop_hotkey_entry.editingFinished.connect(self.apply_hotkeys)
+        t_row.addWidget(self.stop_hotkey_entry)
+        t_row.addStretch(1)
+        hv.addLayout(t_row)
+
+        self.hotkey_status_label = self._faint("", wrap=True)
+        hv.addWidget(self.hotkey_status_label)
+        hv.addWidget(self._faint(
+            "Work globally, even while Roblox is focused. Use names like 'f1' or combos like "
+            "'ctrl+alt+s'. Applies immediately and is saved with your other settings.", wrap=True))
+        cl.addWidget(hk)
+        cl.addStretch(1)
+        return page
+
+    # ------------------------------------------------------------------
+    # Biomes page
+    # ------------------------------------------------------------------
+    def _build_biomes_page(self):
+        page = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(10)
+
+        header = QtWidgets.QHBoxLayout()
+        header.addWidget(self._heading("Select Biomes to Hunt"))
+        header.addStretch(1)
+        reset_btn = QtWidgets.QPushButton("Reset All Biome Times")
+        reset_btn.setObjectName("danger")
+        reset_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        reset_btn.clicked.connect(self.reset_all_biome_times)
+        header.addWidget(reset_btn)
+        v.addLayout(header)
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QtWidgets.QWidget()
+        grid = QtWidgets.QGridLayout(content)
+        grid.setContentsMargins(2, 2, 8, 2)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        grid.setAlignment(QtCore.Qt.AlignTop)
+        scroll.setWidget(content)
+        v.addWidget(scroll, 1)
 
         self.biome_switches = {}
         self.biome_icon_labels = {}
@@ -847,217 +1063,204 @@ class FishSniperUI(ctk.CTk):
         self.checkin_delay_entries = {}
         self.checkin_flaps = {}
         self.checkin_expand_btns = {}
-        self.checkin_flap_expanded = {}
         self.biome_time_labels = {}
+
         for i, biome in enumerate(BIOMES):
             row, col = divmod(i, 3)
-            card = ctk.CTkFrame(self.scroll_biomes, fg_color=THEME["card"], corner_radius=10,
-                                 border_width=1, border_color=THEME["card_border"])
-            card.grid(row=row, column=col, padx=6, pady=6, sticky="ew")
+            card = QtWidgets.QFrame()
+            card.setObjectName("innerCard")
+            cv = QtWidgets.QVBoxLayout(card)
+            cv.setContentsMargins(12, 10, 12, 10)
+            cv.setSpacing(6)
 
-            row_frame = ctk.CTkFrame(card, fg_color="transparent")
-            row_frame.pack(anchor="w", padx=12, pady=10, fill="x")
-
-            thumb = get_biome_ctk_image(biome, size=(20, 20))
-            if thumb:
-                icon_label = ctk.CTkLabel(row_frame, text="", image=thumb)
-            else:
-                icon_label = ctk.CTkLabel(row_frame, text=BIOME_ICONS.get(biome, "🌐"),
-                                           font=ctk.CTkFont(size=15))
-            icon_label.pack(side="left", padx=(0, 8))
+            top = QtWidgets.QHBoxLayout()
+            icon_label = QtWidgets.QLabel(BIOME_ICONS.get(biome, "🌐"))
+            icon_label.setStyleSheet("font-size: 15px;")
+            icon_label.setFixedWidth(24)
             self.biome_icon_labels[biome] = icon_label
+            top.addWidget(icon_label)
 
-            switch = ctk.CTkSwitch(row_frame, text=biome, font=self.normal_font,
-                                    progress_color=THEME["accent"], command=self.on_biome_toggle,
-                                    text_color=THEME["text"])
-            switch.pack(side="left")
+            switch = QtWidgets.QCheckBox(biome)
+            switch.toggled.connect(self.on_biome_toggle)
             self.biome_switches[biome] = switch
+            top.addWidget(switch)
+            top.addStretch(1)
 
-            # Every biome gets an expandable check-in-screenshot flap, not
-            # just a fixed set — the delay (and whether it's on at all) is
-            # fully configurable per biome from here.
-            expand_btn = ctk.CTkButton(row_frame, text="⌄", width=22, height=22,
-                                        font=ctk.CTkFont(size=12), fg_color="transparent",
-                                        hover_color=THEME["card_hover"], text_color=THEME["text_dim"],
-                                        command=lambda b=biome: self.toggle_checkin_flap(b))
-            expand_btn.pack(side="right")
+            expand_btn = QtWidgets.QPushButton("⌄")
+            expand_btn.setObjectName("iconGhost")
+            expand_btn.setFixedSize(24, 24)
+            expand_btn.setCursor(QtCore.Qt.PointingHandCursor)
+            expand_btn.clicked.connect(lambda _=False, b=biome: self.toggle_checkin_flap(b))
             self.checkin_expand_btns[biome] = expand_btn
-            self.checkin_flap_expanded[biome] = False
+            top.addWidget(expand_btn)
+            cv.addLayout(top)
 
             default_config = DEFAULT_CHECKIN_SCREENSHOT_CONFIG.get(
                 biome, {"enabled": False, "delay": DEFAULT_CHECKIN_DELAY})
 
-            flap = ctk.CTkFrame(card, fg_color=THEME["bg_alt"], corner_radius=8)
-            self.checkin_flaps[biome] = flap  # not packed yet — starts collapsed
+            flap = QtWidgets.QFrame()
+            flap.setObjectName("innerCard")
+            fv = QtWidgets.QVBoxLayout(flap)
+            fv.setContentsMargins(10, 8, 10, 8)
+            fv.setSpacing(4)
 
-            fish_switch = ctk.CTkSwitch(flap, text="🎣 Fish This Biome", font=self.small_font,
-                                         progress_color=THEME["accent"], text_color=THEME["text_dim"])
-            fish_switch.select()  # enabled by default
-            fish_switch.pack(anchor="w", padx=10, pady=(10, 2))
+            fish_switch = QtWidgets.QCheckBox("🎣 Fish This Biome")
+            fish_switch.setChecked(True)
             self.fish_switches[biome] = fish_switch
+            fv.addWidget(fish_switch)
+            fv.addWidget(self._faint(
+                "When off, the bot just sits in this biome (with anti-AFK) instead of fishing.", wrap=True))
 
-            ctk.CTkLabel(
-                flap, text="When off, the bot just sits in this biome (with anti-AFK) instead of fishing.",
-                font=self.small_font, text_color=THEME["text_faint"], wraplength=190, justify="left",
-            ).pack(anchor="w", padx=10, pady=(0, 8))
-
-            divider = ctk.CTkFrame(flap, fg_color=THEME["card_border"], height=1)
-            divider.pack(fill="x", padx=10, pady=(0, 8))
-
-            checkin_switch = ctk.CTkSwitch(flap, text="📸 Check-in Screenshot", font=self.small_font,
-                                            progress_color=THEME["accent2"], text_color=THEME["text_dim"])
-            if default_config["enabled"]:
-                checkin_switch.select()
-            checkin_switch.pack(anchor="w", padx=10, pady=(0, 6))
+            checkin_switch = QtWidgets.QCheckBox("📸 Check-in Screenshot")
+            checkin_switch.setChecked(bool(default_config["enabled"]))
             self.checkin_switches[biome] = checkin_switch
+            fv.addWidget(checkin_switch)
 
-            delay_row = ctk.CTkFrame(flap, fg_color="transparent")
-            delay_row.pack(anchor="w", fill="x", padx=10, pady=(0, 4))
-            ctk.CTkLabel(delay_row, text="Delay (sec):", font=self.small_font,
-                         text_color=THEME["text_faint"]).pack(side="left")
-            delay_entry = ctk.CTkEntry(delay_row, width=56, height=24, font=self.small_font,
-                                        fg_color=THEME["card"], border_color=THEME["card_border"])
-            delay_entry.insert(0, str(default_config["delay"]))
-            delay_entry.pack(side="left", padx=(6, 0))
+            delay_row = QtWidgets.QHBoxLayout()
+            delay_row.addWidget(self._faint("Delay (sec):"))
+            delay_entry = self._line_edit("", str(default_config["delay"]))
+            delay_entry.setFixedWidth(60)
+            delay_row.addWidget(delay_entry)
+            delay_row.addStretch(1)
             self.checkin_delay_entries[biome] = delay_entry
+            fv.addLayout(delay_row)
+            fv.addWidget(self._faint(
+                "Sends a follow-up screenshot this many seconds after the biome is confirmed "
+                "(skipped if it ends first).", wrap=True))
 
-            ctk.CTkLabel(
-                flap, text="Sends a follow-up screenshot this many seconds after the biome is "
-                           "confirmed (skipped if it ends first).",
-                font=self.small_font, text_color=THEME["text_faint"], wraplength=190, justify="left",
-            ).pack(anchor="w", padx=10, pady=(0, 8))
-
-            divider2 = ctk.CTkFrame(flap, fg_color=THEME["card_border"], height=1)
-            divider2.pack(fill="x", padx=10, pady=(0, 8))
-
-            time_label = ctk.CTkLabel(flap, text="Time in Biome: 0:00", font=self.small_font,
-                                       text_color=THEME["text_dim"])
-            time_label.pack(anchor="w", padx=10, pady=(0, 10))
+            time_label = self._muted("Time in Biome: 0:00")
+            fv.addWidget(time_label)
             self.biome_time_labels[biome] = time_label
 
+            flap.setVisible(False)
+            self.checkin_flaps[biome] = flap
+            cv.addWidget(flap)
+
+            grid.addWidget(card, row, col)
+        for c in range(3):
+            grid.setColumnStretch(c, 1)
+        return page
+
     def toggle_checkin_flap(self, biome):
-        """Expands or collapses the check-in screenshot flap under a biome card."""
         flap = self.checkin_flaps[biome]
-        expanded = self.checkin_flap_expanded.get(biome, False)
-        if expanded:
-            flap.pack_forget()
-            self.checkin_expand_btns[biome].configure(text="⌄")
-        else:
-            flap.pack(fill="x", padx=12, pady=(0, 10))
-            self.checkin_expand_btns[biome].configure(text="⌃")
-        self.checkin_flap_expanded[biome] = not expanded
+        expanded = flap.isVisible()
+        flap.setVisible(not expanded)
+        self.checkin_expand_btns[biome].setText("⌄" if expanded else "⌃")
 
     def get_checkin_screenshot_settings(self):
         settings = {}
         for biome, switch in self.checkin_switches.items():
             entry = self.checkin_delay_entries.get(biome)
             try:
-                delay = max(0, int((entry.get() if entry else "").strip() or 0))
+                delay = max(0, int((entry.text() if entry else "").strip() or 0))
             except ValueError:
                 delay = 0
-            settings[biome] = {"enabled": switch.get() == 1, "delay": delay}
+            settings[biome] = {"enabled": switch.isChecked(), "delay": delay}
         return settings
 
     def get_fishing_enabled_settings(self):
-        return {biome: (switch.get() == 1) for biome, switch in self.fish_switches.items()}
+        return {biome: switch.isChecked() for biome, switch in self.fish_switches.items()}
 
     def refresh_biome_time_labels(self):
-        """Updates every biome's "Time in Biome" label from the scanner's
-        recorded totals. Deliberately not a live-ticking display — per
-        design, a biome's displayed time only advances once that timing
-        segment actually ends and gets committed."""
         for biome, label in self.biome_time_labels.items():
             total_seconds = scanner.biome_time_totals.get(biome, 0)
-            label.configure(text=f"Time in Biome: {format_biome_duration(total_seconds)}")
+            label.setText(f"Time in Biome: {format_biome_duration(total_seconds)}")
 
     def _on_biome_time_updated(self, biome, new_total_seconds):
-        """Received from the Discord scanner's background tracker thread
-        whenever a time-in-biome segment commits. Marshals onto the main
-        thread to update the label and persist immediately, so accumulated
-        time survives even if the app closes uncleanly."""
         def handle():
             label = self.biome_time_labels.get(biome)
             if label:
-                label.configure(text=f"Time in Biome: {format_biome_duration(new_total_seconds)}")
+                label.setText(f"Time in Biome: {format_biome_duration(new_total_seconds)}")
             self.save_settings()
-
         self.after(0, handle)
 
     def reset_all_biome_times(self):
-        """Resets every biome's recorded time back to zero, after an
-        explicit confirmation — this can't be undone, so a stray click
-        shouldn't be able to wipe out accumulated time."""
-        confirmed = messagebox.askyesno(
-            "Reset Biome Times",
+        confirmed = QtWidgets.QMessageBox.question(
+            self, "Reset Biome Times",
             "This will permanently reset the recorded time for every biome back to zero.\n\n"
             "This cannot be undone. Continue?",
-        )
+        ) == QtWidgets.QMessageBox.Yes
         if not confirmed:
             return
         scanner.reset_biome_time_totals()
         self.refresh_biome_time_labels()
         self.save_settings()
 
-    def _build_priority_tab(self):
-        self.tab_priority.grid_columnconfigure(0, weight=1)
-        self.tab_priority.grid_rowconfigure(1, weight=1)
+    # ------------------------------------------------------------------
+    # Priority page
+    # ------------------------------------------------------------------
+    def _build_priority_page(self):
+        page = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(8)
+        v.addWidget(self._heading("Priority Tiers"))
+        self.priority_board = PriorityBoard(self)
+        v.addWidget(self.priority_board, 1)
+        return page
 
-        ctk.CTkLabel(self.tab_priority, text="Priority Tiers", font=self.heading_font,
-                     text_color=THEME["text"]).grid(row=0, column=0, padx=4, pady=(6, 4), sticky="w")
+    # ------------------------------------------------------------------
+    # Servers page
+    # ------------------------------------------------------------------
+    def _build_servers_page(self):
+        page = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(10)
+        v.addWidget(self._heading("Discord Server Configuration"))
 
-        self.priority_board = PriorityBoard(self.tab_priority, self)
-        self.priority_board.grid(row=1, column=0, padx=2, pady=(0, 10), sticky="nsew")
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        container = QtWidgets.QWidget()
+        self.guild_layout = QtWidgets.QVBoxLayout(container)
+        self.guild_layout.setContentsMargins(2, 2, 8, 2)
+        self.guild_layout.setSpacing(8)
+        self.guild_layout.setAlignment(QtCore.Qt.AlignTop)
+        scroll.setWidget(container)
+        v.addWidget(scroll, 1)
 
-    def _build_servers_tab(self):
-        self.tab_servers.grid_columnconfigure(0, weight=1)
-        self.tab_servers.grid_rowconfigure(1, weight=1)
+        self.guild_entries = []
 
-        ctk.CTkLabel(self.tab_servers, text="Discord Server Configuration", font=self.heading_font,
-                     text_color=THEME["text"]).grid(row=0, column=0, padx=4, pady=(6, 10), sticky="w")
+        self.add_guild_btn = QtWidgets.QPushButton("+ Add Server")
+        self.add_guild_btn.setObjectName("ghost")
+        self.add_guild_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.add_guild_btn.clicked.connect(self.add_guild_entry)
+        v.addWidget(self.add_guild_btn, 0, QtCore.Qt.AlignLeft)
 
-        self.guild_scroll_frame = ctk.CTkScrollableFrame(self.tab_servers, fg_color="transparent")
-        self.guild_scroll_frame.grid(row=1, column=0, padx=2, pady=(0, 10), sticky="nsew")
-
-        self.guild_entries = []  # list of dicts: frame, name, guild, channels, categories
-
-        button_frame = ctk.CTkFrame(self.tab_servers, fg_color="transparent")
-        button_frame.grid(row=2, column=0, padx=4, pady=(0, 6), sticky="w")
-
-        self.add_guild_btn = ctk.CTkButton(button_frame, text="+ Add Server", command=self.add_guild_entry,
-                                            width=130, fg_color=THEME["accent2"],
-                                            hover_color=THEME["accent2_hover"])
-        self.add_guild_btn.pack(side="left")
-
-        # Add initial entry
         self.add_guild_entry()
+        return page
 
-    def _build_shop_tab(self):
-        self.tab_shop.grid_columnconfigure(0, weight=1)
-        self.tab_shop.grid_rowconfigure(2, weight=1)
+    # ------------------------------------------------------------------
+    # Shop page
+    # ------------------------------------------------------------------
+    def _build_shop_page(self):
+        page = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(10)
 
-        header_row = ctk.CTkFrame(self.tab_shop, fg_color="transparent")
-        header_row.grid(row=0, column=0, padx=4, pady=(6, 4), sticky="ew")
-        header_row.grid_columnconfigure(0, weight=1)
+        header = QtWidgets.QHBoxLayout()
+        header.addWidget(self._heading("Auto-Buy"))
+        header.addStretch(1)
+        self.buy_master_switch = QtWidgets.QCheckBox("Enable Auto-Buy")
+        header.addWidget(self.buy_master_switch)
+        v.addLayout(header)
 
-        ctk.CTkLabel(header_row, text="Auto-Buy", font=self.heading_font,
-                     text_color=THEME["text"]).grid(row=0, column=0, sticky="w")
+        v.addWidget(self._faint(
+            "Runs right after any sell loop, while the merchant is still open — nothing runs at all if "
+            "no enabled item is due. The shop restocks daily at 8 PM ET; an item already bought since the "
+            "last restock won't be bought again until the next one.", wrap=True))
 
-        self.buy_master_switch = ctk.CTkSwitch(header_row, text="Enable Auto-Buy", font=self.normal_font,
-                                                progress_color=THEME["accent"], text_color=THEME["text"])
-        self.buy_master_switch.grid(row=0, column=1, sticky="e")
-
-        ctk.CTkLabel(
-            self.tab_shop,
-            text="Runs right after any sell loop, while the merchant is still open — nothing runs at "
-                 "all if no enabled item is due. The shop restocks daily at 8 PM ET; an item already "
-                 "bought since the last restock won't be bought again until the next one.",
-            font=self.small_font, text_color=THEME["text_dim"], wraplength=700, justify="left",
-        ).grid(row=1, column=0, padx=4, pady=(0, 10), sticky="w")
-
-        self.scroll_shop = ctk.CTkScrollableFrame(self.tab_shop, fg_color="transparent")
-        self.scroll_shop.grid(row=2, column=0, padx=2, pady=(0, 10), sticky="nsew")
-        for col in range(3):
-            self.scroll_shop.grid_columnconfigure(col, weight=1)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QtWidgets.QWidget()
+        grid = QtWidgets.QGridLayout(content)
+        grid.setContentsMargins(2, 2, 8, 2)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        grid.setAlignment(QtCore.Qt.AlignTop)
+        scroll.setWidget(content)
+        v.addWidget(scroll, 1)
 
         self.buy_switches = {}
         self.buy_qty_entries = {}
@@ -1068,102 +1271,417 @@ class FishSniperUI(ctk.CTk):
             name = item["name"]
             max_qty = item["max_qty"]
 
-            card = ctk.CTkFrame(self.scroll_shop, fg_color=THEME["card"], corner_radius=10,
-                                 border_width=1, border_color=THEME["card_border"])
-            card.grid(row=row, column=col, padx=6, pady=6, sticky="ew")
+            card = QtWidgets.QFrame()
+            card.setObjectName("innerCard")
+            cv = QtWidgets.QVBoxLayout(card)
+            cv.setContentsMargins(12, 10, 12, 10)
+            cv.setSpacing(6)
 
-            switch = ctk.CTkSwitch(card, text=name, font=self.normal_font,
-                                    progress_color=THEME["accent"], text_color=THEME["text"])
-            switch.pack(anchor="w", padx=12, pady=(10, 6), fill="x")
+            switch = QtWidgets.QCheckBox(name)
             self.buy_switches[name] = switch
+            cv.addWidget(switch)
 
-            qty_row = ctk.CTkFrame(card, fg_color="transparent")
-            qty_row.pack(anchor="w", padx=12, pady=(0, 6), fill="x")
-            ctk.CTkLabel(qty_row, text=f"Qty (max {max_qty}):", font=self.small_font,
-                         text_color=THEME["text_dim"]).pack(side="left")
-            qty_entry = ctk.CTkEntry(qty_row, width=70, height=26, font=self.small_font,
-                                      fg_color=THEME["bg_alt"], border_color=THEME["card_border"])
-            qty_entry.insert(0, "0")
-            qty_entry.pack(side="left", padx=(6, 0))
-            qty_entry.bind("<FocusOut>", lambda e, n=name, m=max_qty: self._clamp_buy_quantity(n, m))
-            qty_entry.bind("<Return>", lambda e, n=name, m=max_qty: self._clamp_buy_quantity(n, m))
+            qty_row = QtWidgets.QHBoxLayout()
+            qty_row.addWidget(self._faint(f"Qty (max {max_qty}):"))
+            qty_entry = self._line_edit("", "0")
+            qty_entry.setFixedWidth(70)
+            qty_entry.editingFinished.connect(lambda n=name, m=max_qty: self._clamp_buy_quantity(n, m))
             self.buy_qty_entries[name] = qty_entry
+            qty_row.addWidget(qty_entry)
+            qty_row.addStretch(1)
+            cv.addLayout(qty_row)
 
-            status_label = ctk.CTkLabel(card, text="Not bought yet", font=self.small_font,
-                                         text_color=THEME["text_faint"])
-            status_label.pack(anchor="w", padx=12, pady=(0, 10))
+            status_label = self._faint("Not bought yet")
             self.buy_status_labels[name] = status_label
+            cv.addWidget(status_label)
+
+            grid.addWidget(card, row, col)
+        for c in range(3):
+            grid.setColumnStretch(c, 1)
 
         self.refresh_buy_status_labels()
+        return page
 
     def _clamp_buy_quantity(self, item_name, max_qty):
         entry = self.buy_qty_entries.get(item_name)
         if not entry:
             return
         try:
-            value = int(entry.get().strip() or "0")
+            value = int(entry.text().strip() or "0")
         except ValueError:
             value = 0
-        value = max(0, min(value, max_qty))
-        entry.delete(0, 'end')
-        entry.insert(0, str(value))
+        entry.setText(str(max(0, min(value, max_qty))))
 
     def get_buy_settings(self):
-        """Returns (master_enabled, item_settings) where item_settings is
-        {item_name: {"enabled": bool, "quantity": int}}."""
         item_settings = {}
         for item in fishing.BUY_ITEMS:
             name = item["name"]
             switch = self.buy_switches.get(name)
             entry = self.buy_qty_entries.get(name)
             try:
-                qty = int((entry.get() if entry else "0").strip() or 0)
+                qty = int((entry.text() if entry else "0").strip() or 0)
             except ValueError:
                 qty = 0
             qty = max(0, min(qty, item["max_qty"]))
-            item_settings[name] = {"enabled": switch.get() == 1 if switch else False, "quantity": qty}
-        master_enabled = self.buy_master_switch.get() == 1
+            item_settings[name] = {"enabled": switch.isChecked() if switch else False, "quantity": qty}
+        master_enabled = self.buy_master_switch.isChecked()
         return master_enabled, item_settings
 
     def refresh_buy_status_labels(self):
-        """Recomputes each item's "bought today" status label from
-        fish_loop's recorded purchase timestamps against the current
-        restock boundary."""
         boundary = current_shop_restock_boundary()
         for name, label in self.buy_status_labels.items():
             last = fish_loop.last_purchased.get(name)
             if last is not None and last >= boundary:
                 stamp = last.astimezone(SHOP_RESTOCK_TZ).strftime("%I:%M %p").lstrip("0")
-                label.configure(text=f"Bought today ({stamp} ET)", text_color=THEME["success"])
+                label.setText(f"Bought today ({stamp} ET)")
+                label.setStyleSheet(f"color:{THEME['success']}; font-size:11px;")
             else:
-                label.configure(text="Not bought yet", text_color=THEME["text_faint"])
+                label.setText("Not bought yet")
+                label.setStyleSheet(f"color:{THEME['text_faint']}; font-size:11px;")
 
     def _on_item_purchased(self, item_name, quantity):
-        """Received from the fishing thread after a successful purchase.
-        Marshals onto the main thread to update the status label and
-        safely read the webhook URL, then sends the alert on its own
-        background thread so the network call blocks neither the UI nor
-        the fishing loop."""
         def handle():
             self.refresh_buy_status_labels()
-
-            webhook_url = self.ds_webhook_entry.get().strip()
+            webhook_url = self.ds_webhook_entry.text().strip()
             if not webhook_url or not webhook_url.startswith("http"):
                 return
 
             def send():
                 from webhook import Webhook
                 Webhook(webhook_url).send_item_purchased(item_name, quantity)
-
             threading.Thread(target=send, daemon=True).start()
-
         self.after(0, handle)
+
+    # ------------------------------------------------------------------
+    # Auto Item page
+    # ------------------------------------------------------------------
+    def _build_auto_item_page(self):
+        page = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(10)
+
+        header = QtWidgets.QHBoxLayout()
+        header.addWidget(self._heading("Auto Item"))
+        header.addStretch(1)
+        self.auto_item_count_label = self._faint(f"0/{MAX_AUTO_ITEMS}")
+        header.addWidget(self.auto_item_count_label)
+        add_btn = QtWidgets.QPushButton("+ Add Item")
+        add_btn.setObjectName("ghost")
+        add_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        add_btn.clicked.connect(lambda: self.add_auto_item_row())
+        header.addWidget(add_btn)
+        v.addLayout(header)
+
+        v.addWidget(self._faint(
+            "Uses each enabled item on any server whose biome matches one of its checked boxes — "
+            "right after the join screenshot, before any pathing begins.", wrap=True))
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        container = QtWidgets.QWidget()
+        self.auto_item_layout = QtWidgets.QVBoxLayout(container)
+        self.auto_item_layout.setContentsMargins(2, 2, 8, 2)
+        self.auto_item_layout.setSpacing(8)
+        self.auto_item_layout.setAlignment(QtCore.Qt.AlignTop)
+        scroll.setWidget(container)
+        v.addWidget(scroll, 1)
+
+        self.auto_item_rows = []
+        return page
+
+    def _update_auto_item_count_label(self):
+        self.auto_item_count_label.setText(f"{len(self.auto_item_rows)}/{MAX_AUTO_ITEMS}")
+
+    def add_auto_item_row(self, config=None):
+        if len(self.auto_item_rows) >= MAX_AUTO_ITEMS:
+            QtWidgets.QMessageBox.warning(self, "Auto Item Limit",
+                                          f"You can have at most {MAX_AUTO_ITEMS} auto-items.")
+            return
+        config = config or {}
+
+        card = QtWidgets.QFrame()
+        card.setObjectName("innerCard")
+        cv = QtWidgets.QVBoxLayout(card)
+        cv.setContentsMargins(12, 10, 12, 10)
+        cv.setSpacing(6)
+
+        top = QtWidgets.QHBoxLayout()
+        enabled_switch = QtWidgets.QCheckBox()
+        enabled_switch.setChecked(bool(config.get("enabled")))
+        top.addWidget(enabled_switch)
+
+        name_entry = self._line_edit("Item name", config.get("name", ""))
+        top.addWidget(name_entry, 1)
+
+        top.addWidget(self._faint("Qty:"))
+        qty_entry = self._line_edit("", str(config.get("quantity", 1)))
+        qty_entry.setFixedWidth(60)
+        top.addWidget(qty_entry)
+
+        remove_btn = QtWidgets.QPushButton("✕")
+        remove_btn.setObjectName("iconGhost")
+        remove_btn.setFixedSize(28, 28)
+        remove_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        top.addWidget(remove_btn)
+        cv.addLayout(top)
+
+        biome_grid = QtWidgets.QGridLayout()
+        biome_grid.setHorizontalSpacing(10)
+        biome_grid.setVerticalSpacing(2)
+        biome_checks = {}
+        configured = set(config.get("biomes", []))
+        per_row = 7
+        for i, biome in enumerate(BIOMES):
+            check = QtWidgets.QCheckBox(biome)
+            check.setChecked(biome in configured)
+            biome_grid.addWidget(check, i // per_row, i % per_row)
+            biome_checks[biome] = check
+        cv.addLayout(biome_grid)
+
+        row_data = {
+            "frame": card,
+            "enabled_switch": enabled_switch,
+            "name_entry": name_entry,
+            "qty_entry": qty_entry,
+            "biome_checks": biome_checks,
+        }
+        remove_btn.clicked.connect(lambda: self.remove_auto_item_row(row_data))
+        self.auto_item_layout.addWidget(card)
+        self.auto_item_rows.append(row_data)
+        self._update_auto_item_count_label()
+
+    def remove_auto_item_row(self, row_data):
+        self.auto_item_rows = [r for r in self.auto_item_rows if r is not row_data]
+        row_data["frame"].setParent(None)
+        row_data["frame"].deleteLater()
+        self._update_auto_item_count_label()
+
+    def get_auto_item_settings(self):
+        items = []
+        for row in self.auto_item_rows:
+            name = row["name_entry"].text().strip()
+            if not name:
+                continue
+            try:
+                qty = max(1, int(row["qty_entry"].text().strip() or "1"))
+            except ValueError:
+                qty = 1
+            biomes = [b for b, c in row["biome_checks"].items() if c.isChecked()]
+            items.append({"enabled": row["enabled_switch"].isChecked(), "name": name,
+                          "quantity": qty, "biomes": biomes})
+        return items
+
+    # ------------------------------------------------------------------
+    # Gauntlet page
+    # ------------------------------------------------------------------
+    def _build_gauntlet_page(self):
+        page, cl = self._scroll_page()
+
+        header = QtWidgets.QHBoxLayout()
+        header.addWidget(self._heading("Gauntlet"))
+        header.addStretch(1)
+        self.gauntlet_count_label = self._faint(f"0/{MAX_GAUNTLETS}")
+        header.addWidget(self.gauntlet_count_label)
+        add_btn = QtWidgets.QPushButton("+ Add Device")
+        add_btn.setObjectName("ghost")
+        add_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        add_btn.clicked.connect(lambda: self.add_gauntlet_row())
+        header.addWidget(add_btn)
+        cl.addLayout(header)
+
+        cl.addWidget(self._faint(
+            "Swaps to the mapped device the moment a biome is confirmed — safely between casts, never "
+            "mid-bite or mid-minigame. Once a swap starts it always finishes, even through a disconnect "
+            "or a higher-priority biome; only Stop can cut it short.", wrap=True))
+
+        default_row = QtWidgets.QFrame()
+        default_row.setObjectName("innerCard")
+        dr = QtWidgets.QHBoxLayout(default_row)
+        dr.setContentsMargins(12, 8, 12, 8)
+        dr.addWidget(QtWidgets.QLabel("Default device (used for any biome without its own pick below):"))
+        self.gauntlet_default_dropdown = self._combo(["None"])
+        self.gauntlet_default_dropdown.setFixedWidth(160)
+        dr.addWidget(self.gauntlet_default_dropdown)
+        dr.addStretch(1)
+        cl.addWidget(default_row)
+
+        rows_host = QtWidgets.QWidget()
+        self.gauntlet_layout = QtWidgets.QVBoxLayout(rows_host)
+        self.gauntlet_layout.setContentsMargins(0, 0, 0, 0)
+        self.gauntlet_layout.setSpacing(8)
+        cl.addWidget(rows_host)
+        self.gauntlet_rows = []
+
+        cl.addWidget(self._heading("Per-Biome Device"))
+        biome_grid = QtWidgets.QGridLayout()
+        biome_grid.setHorizontalSpacing(10)
+        biome_grid.setVerticalSpacing(6)
+        self.gauntlet_biome_dropdowns = {}
+        for i, biome in enumerate(BIOMES):
+            row, col = divmod(i, 3)
+            cell = QtWidgets.QFrame()
+            cell.setObjectName("innerCard")
+            ch = QtWidgets.QHBoxLayout(cell)
+            ch.setContentsMargins(10, 6, 10, 6)
+            ch.addWidget(QtWidgets.QLabel(biome))
+            ch.addStretch(1)
+            dropdown = self._combo(["Default"])
+            dropdown.setFixedWidth(120)
+            ch.addWidget(dropdown)
+            self.gauntlet_biome_dropdowns[biome] = dropdown
+            biome_grid.addWidget(cell, row, col)
+        for c in range(3):
+            biome_grid.setColumnStretch(c, 1)
+        cl.addLayout(biome_grid)
+        cl.addStretch(1)
+        return page
+
+    def _update_gauntlet_count_label(self):
+        self.gauntlet_count_label.setText(f"{len(self.gauntlet_rows)}/{MAX_GAUNTLETS}")
+
+    def add_gauntlet_row(self, config=None):
+        if len(self.gauntlet_rows) >= MAX_GAUNTLETS:
+            QtWidgets.QMessageBox.warning(self, "Gauntlet Limit",
+                                          f"You can have at most {MAX_GAUNTLETS} gauntlet devices.")
+            return
+        config = config or {}
+
+        card = QtWidgets.QFrame()
+        card.setObjectName("innerCard")
+        cv = QtWidgets.QVBoxLayout(card)
+        cv.setContentsMargins(12, 10, 12, 10)
+        cv.setSpacing(6)
+
+        top = QtWidgets.QHBoxLayout()
+        name_entry = self._line_edit("Device name (for your own organization)", config.get("name", ""))
+        name_entry.editingFinished.connect(self.refresh_gauntlet_dropdown_options)
+        top.addWidget(name_entry, 1)
+        remove_btn = QtWidgets.QPushButton("✕")
+        remove_btn.setObjectName("iconGhost")
+        remove_btn.setFixedSize(28, 28)
+        remove_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        top.addWidget(remove_btn)
+        cv.addLayout(top)
+
+        item_pos = config.get("item_pos", (0, 0))
+        button_pos = config.get("gauntlet_button_pos", (0, 0))
+        coord_row = QtWidgets.QHBoxLayout()
+        coord_row.addWidget(self._faint("Item position:"))
+        item_x_entry = self._line_edit("", str(item_pos[0]))
+        item_x_entry.setFixedWidth(54)
+        item_y_entry = self._line_edit("", str(item_pos[1]))
+        item_y_entry.setFixedWidth(54)
+        coord_row.addWidget(item_x_entry)
+        coord_row.addWidget(item_y_entry)
+        coord_row.addSpacing(14)
+        coord_row.addWidget(self._faint("Gauntlet button:"))
+        button_x_entry = self._line_edit("", str(button_pos[0]))
+        button_x_entry.setFixedWidth(54)
+        button_y_entry = self._line_edit("", str(button_pos[1]))
+        button_y_entry.setFixedWidth(54)
+        coord_row.addWidget(button_x_entry)
+        coord_row.addWidget(button_y_entry)
+        coord_row.addStretch(1)
+        cv.addLayout(coord_row)
+
+        scroll_row = QtWidgets.QHBoxLayout()
+        scroll_check = QtWidgets.QCheckBox("Needs scroll")
+        scroll_check.setChecked(bool(config.get("needs_scroll")))
+        scroll_row.addWidget(scroll_check)
+        scroll_row.addSpacing(12)
+        scroll_row.addWidget(self._faint("Scroll ticks (single wheel clicks):"))
+        scroll_ticks_entry = self._line_edit("", str(config.get("scroll_ticks", 0)))
+        scroll_ticks_entry.setFixedWidth(50)
+        scroll_row.addWidget(scroll_ticks_entry)
+        scroll_row.addStretch(1)
+        cv.addLayout(scroll_row)
+
+        row_data = {
+            "frame": card,
+            "name_entry": name_entry,
+            "item_x_entry": item_x_entry,
+            "item_y_entry": item_y_entry,
+            "button_x_entry": button_x_entry,
+            "button_y_entry": button_y_entry,
+            "scroll_check": scroll_check,
+            "scroll_ticks_entry": scroll_ticks_entry,
+        }
+        remove_btn.clicked.connect(lambda: self.remove_gauntlet_row(row_data))
+        self.gauntlet_layout.addWidget(card)
+        self.gauntlet_rows.append(row_data)
+        self._update_gauntlet_count_label()
+        self.refresh_gauntlet_dropdown_options()
+
+    def remove_gauntlet_row(self, row_data):
+        self.gauntlet_rows = [r for r in self.gauntlet_rows if r is not row_data]
+        row_data["frame"].setParent(None)
+        row_data["frame"].deleteLater()
+        self._update_gauntlet_count_label()
+        self.refresh_gauntlet_dropdown_options()
+
+    def _gauntlet_names(self):
+        return [r["name_entry"].text().strip() for r in self.gauntlet_rows if r["name_entry"].text().strip()]
+
+    def _reset_combo(self, combo, values, keep):
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(values)
+        combo.setCurrentText(keep if keep in values else values[0])
+        combo.blockSignals(False)
+
+    def refresh_gauntlet_dropdown_options(self):
+        names = self._gauntlet_names()
+        default_values = ["None"] + names
+        self._reset_combo(self.gauntlet_default_dropdown, default_values,
+                          self.gauntlet_default_dropdown.currentText())
+        biome_values = ["Default"] + names
+        for dropdown in self.gauntlet_biome_dropdowns.values():
+            self._reset_combo(dropdown, biome_values, dropdown.currentText())
+
+    def get_gauntlet_settings(self):
+        gauntlets = {}
+        for row in self.gauntlet_rows:
+            name = row["name_entry"].text().strip()
+            if not name:
+                continue
+            try:
+                item_pos = (int(row["item_x_entry"].text().strip() or 0),
+                            int(row["item_y_entry"].text().strip() or 0))
+            except ValueError:
+                item_pos = (0, 0)
+            try:
+                button_pos = (int(row["button_x_entry"].text().strip() or 0),
+                              int(row["button_y_entry"].text().strip() or 0))
+            except ValueError:
+                button_pos = (0, 0)
+            try:
+                scroll_ticks = max(0, int(row["scroll_ticks_entry"].text().strip() or 0))
+            except ValueError:
+                scroll_ticks = 0
+            gauntlets[name] = {
+                "item_pos": item_pos,
+                "gauntlet_button_pos": button_pos,
+                "needs_scroll": row["scroll_check"].isChecked(),
+                "scroll_ticks": scroll_ticks,
+            }
+
+        default_name = self.gauntlet_default_dropdown.currentText()
+        if default_name == "None" or default_name not in gauntlets:
+            default_name = None
+
+        biome_map = {}
+        for biome, dropdown in self.gauntlet_biome_dropdowns.items():
+            value = dropdown.currentText()
+            if value != "Default" and value in gauntlets:
+                biome_map[biome] = value
+        return gauntlets, default_name, biome_map
 
     # ------------------------------------------------------------------
     # Behavior
     # ------------------------------------------------------------------
     def get_enabled_biomes(self):
-        return [b for b in BIOMES if self.biome_switches[b].get() == 1]
+        return [b for b in BIOMES if self.biome_switches[b].isChecked()]
 
     def on_biome_toggle(self):
         if hasattr(self, "priority_board"):
@@ -1176,19 +1694,16 @@ class FishSniperUI(ctk.CTk):
             return
 
     def _on_active_path_changed(self, path_name):
-        """Receive path changes from the fishing thread without touching Tk off-thread."""
         def update_ui():
-            self.active_path_label.configure(text=f"Active Path: {path_name}")
-            self.path_dropdown.set(path_name)
+            self.active_path_label.setText(f"Active Path: {path_name}")
+            self.path_dropdown.blockSignals(True)
+            self.path_dropdown.setCurrentText(path_name)
+            self.path_dropdown.blockSignals(False)
         self.after(0, update_ui)
 
     def _on_fishing_failsafe(self, failsafe_count, switched_path, screenshot_bytes, triggered_sell):
-        """Received from the fishing thread when a no-bite failsafe fires.
-        Marshals onto the main thread to safely read the webhook URL entry,
-        then sends the alert on its own background thread so the network
-        call blocks neither the UI nor the fishing loop."""
         def handle():
-            webhook_url = self.ds_webhook_entry.get().strip()
+            webhook_url = self.ds_webhook_entry.text().strip()
             if not webhook_url or not webhook_url.startswith("http"):
                 return
 
@@ -1196,106 +1711,90 @@ class FishSniperUI(ctk.CTk):
                 from webhook import Webhook
                 Webhook(webhook_url).send_failsafe_triggered(
                     failsafe_count, switched_path, screenshot_bytes, triggered_sell)
-
             threading.Thread(target=send, daemon=True).start()
-
         self.after(0, handle)
 
     def on_priority_changed(self):
-        # Hook for future auto-persistence; currently a no-op, kept for clarity.
         pass
 
     def _preload_thumbnails(self):
-        """Runs on a background thread: downloads + decodes every biome's thumbnail."""
         for biome in BIOMES:
-            fetch_biome_pil_image(biome)
-            self.after(0, self._on_thumbnail_loaded, biome)
+            fetch_biome_bytes(biome)
+            self.after(0, lambda b=biome: self._on_thumbnail_loaded(b))
 
     def _on_thumbnail_loaded(self, biome):
-        """Runs on the main thread once a thumbnail's PIL image is ready."""
-        thumb = get_biome_ctk_image(biome, size=(20, 20))
-        if thumb and biome in self.biome_icon_labels:
-            self.biome_icon_labels[biome].configure(image=thumb, text="")
+        pix = get_biome_pixmap(biome, size=20)
+        if pix is not None and biome in self.biome_icon_labels:
+            self.biome_icon_labels[biome].setPixmap(pix)
         if hasattr(self, "priority_board"):
             self.priority_board.render()
 
     def validate_priority_assignments(self):
         unassigned = self.priority_board.get_unassigned()
         if unassigned:
-            messagebox.showerror(
-                "Priority Not Set",
+            QtWidgets.QMessageBox.critical(
+                self, "Priority Not Set",
                 "The following enabled biomes need a priority tier before FishSniper can start:\n\n"
-                + "\n".join(f"\u2022 {b}" for b in unassigned)
-                + "\n\nGo to the Priority tab and drag them into a tier."
-            )
-            print(f"[FishSniper] Cannot start \u2014 unassigned biomes: {', '.join(unassigned)}")
+                + "\n".join(f"• {b}" for b in unassigned)
+                + "\n\nGo to the Priority tab and drag them into a tier.")
+            print(f"[FishSniper] Cannot start — unassigned biomes: {', '.join(unassigned)}")
             return False
         return True
 
     def toggle_universal(self):
-        """Universal start/stop button with intelligent state management"""
         if not self.is_running:
             self.start_fishsniper()
         else:
             self.stop_fishsniper()
 
+    def _set_universal_running(self, running):
+        self.universal_button.setObjectName("stop" if running else "start")
+        self.universal_button.setText("■  Stop FishSniper" if running else "▶  Start FishSniper")
+        self.universal_button.style().unpolish(self.universal_button)
+        self.universal_button.style().polish(self.universal_button)
+
     def start_fishsniper(self):
-        """Starts the scanner if it isn't already running. Safe to call
-        repeatedly (e.g. from a hotkey) — a no-op if already started."""
         if self.is_running:
             return
         if not self.validate_priority_assignments():
             return
 
         from webhook import Webhook
-        webhook_url = self.ds_webhook_entry.get().strip()
+        webhook_url = self.ds_webhook_entry.text().strip()
 
-        # STARTING: Begin with scanner active
         self.is_running = True
-        self.universal_button.configure(text="■  Stop FishSniper", fg_color=THEME["danger"],
-                                         hover_color=THEME["danger_hover"])
+        self._set_universal_running(True)
         self.update_status("Scanning for biomes...")
 
-        self.save_settings()  # Auto-sync before launching scanner
-        if self.sell_on_start_switch.get() == 1:
+        self.save_settings()
+        if self.sell_on_start_switch.isChecked():
             fish_loop.request_startup_sell()
         scanner.toggle_on()
         print("[FishSniper] Started - Scanner active, waiting for biome detection")
         Webhook(webhook_url).send_app_started()
 
     def stop_fishsniper(self):
-        """Stops the scanner if it's running. Safe to call repeatedly (e.g.
-        from a hotkey) — a no-op if already stopped."""
         if not self.is_running:
             return
 
         from webhook import Webhook
-        webhook_url = self.ds_webhook_entry.get().strip()
+        webhook_url = self.ds_webhook_entry.text().strip()
 
-        # STOPPING: Stop everything
         self.is_running = False
-        self.universal_button.configure(text="▶  Start FishSniper", fg_color=THEME["success"],
-                                         hover_color=THEME["success_hover"])
+        self._set_universal_running(False)
         self.update_status("Stopped")
 
+        fish_loop.request_user_stop()
         scanner.toggle_off()
         fish_loop.toggle_off()
         print("[FishSniper] Stopped - All systems paused")
         Webhook(webhook_url).send_app_stopped()
 
     def apply_hotkeys(self):
-        """(Re-)registers the global start/stop hotkeys from whatever's
-        currently in the entry fields. Safe to call repeatedly — always
-        unhooks any hotkeys this app previously registered first, so
-        changing a hotkey and calling this again doesn't leave the old
-        binding active too. These work globally (even while Roblox is
-        focused), since they're OS-level hooks via the 'keyboard' package
-        rather than Tkinter key bindings."""
         if keyboard is None:
-            self.hotkey_status_label.configure(
-                text="Hotkeys unavailable — the 'keyboard' package failed to load.",
-                text_color=THEME["danger"],
-            )
+            self.hotkey_status_label.setText(
+                "Hotkeys unavailable — the 'keyboard' package failed to load.")
+            self.hotkey_status_label.setStyleSheet(f"color:{THEME['danger']}; font-size:11px;")
             return
 
         for hotkey_handle in self._registered_hotkey_handles:
@@ -1305,8 +1804,8 @@ class FishSniperUI(ctk.CTk):
                 pass
         self._registered_hotkey_handles = []
 
-        start_key = self.start_hotkey_entry.get().strip() or DEFAULT_START_HOTKEY
-        stop_key = self.stop_hotkey_entry.get().strip() or DEFAULT_STOP_HOTKEY
+        start_key = self.start_hotkey_entry.text().strip() or DEFAULT_START_HOTKEY
+        stop_key = self.stop_hotkey_entry.text().strip() or DEFAULT_STOP_HOTKEY
 
         errors = []
         try:
@@ -1322,191 +1821,188 @@ class FishSniperUI(ctk.CTk):
             errors.append(f"stop hotkey '{stop_key}': {e}")
 
         if errors:
-            self.hotkey_status_label.configure(
-                text="Could not register — " + "; ".join(errors), text_color=THEME["danger"],
-            )
+            self.hotkey_status_label.setText("Could not register — " + "; ".join(errors))
+            self.hotkey_status_label.setStyleSheet(f"color:{THEME['danger']}; font-size:11px;")
             print(f"[UI] Hotkey registration error(s): {'; '.join(errors)}")
         else:
-            self.hotkey_status_label.configure(
-                text=f"Active — Start: '{start_key}'   Stop: '{stop_key}'", text_color=THEME["success"],
-            )
+            self.hotkey_status_label.setText(f"Active — Start: '{start_key}'   Stop: '{stop_key}'")
+            self.hotkey_status_label.setStyleSheet(f"color:{THEME['success']}; font-size:11px;")
             print(f"[UI] Hotkeys registered — Start: '{start_key}', Stop: '{stop_key}'")
 
     def update_status(self, new_status):
-        """Update the status pill from external calls"""
-        color = THEME["text_faint"] if new_status.strip().lower() == "stopped" else THEME["accent"]
-        self.status_pill.set_state(new_status, color)
+        """Thread-safe: marshals onto the GUI thread (scanner calls this from
+        its background thread)."""
+        def apply():
+            color = THEME["text_faint"] if new_status.strip().lower() == "stopped" else THEME["accent"]
+            self.status_pill.set_state(new_status, color)
+        self.after(0, apply)
 
     def test_webhook(self):
-        """Sends a one-off test embed to the currently-entered webhook URL so
-        the user can confirm it's wired up correctly before relying on it."""
-        webhook_url = self.ds_webhook_entry.get().strip()
+        webhook_url = self.ds_webhook_entry.text().strip()
         if not webhook_url or not webhook_url.startswith("http"):
-            messagebox.showerror("Webhook Test", "Enter a valid Discord webhook URL first.")
+            QtWidgets.QMessageBox.critical(self, "Webhook Test", "Enter a valid Discord webhook URL first.")
             return
 
-        self.webhook_test_btn.configure(state="disabled", text="Testing...")
+        self.webhook_test_btn.setEnabled(False)
+        self.webhook_test_btn.setText("Testing...")
 
         def run_test():
             from webhook import Webhook
             success = Webhook(webhook_url).send_test()
-            self.after(0, self._on_webhook_test_done, success)
-
+            self.after(0, lambda: self._on_webhook_test_done(success))
         threading.Thread(target=run_test, daemon=True).start()
 
     def _on_webhook_test_done(self, success):
-        self.webhook_test_btn.configure(state="normal", text="Test")
+        self.webhook_test_btn.setEnabled(True)
+        self.webhook_test_btn.setText("Test")
         if success:
-            messagebox.showinfo("Webhook Test", "Test message sent! Check your Discord channel.")
+            QtWidgets.QMessageBox.information(self, "Webhook Test",
+                                              "Test message sent! Check your Discord channel.")
         else:
-            messagebox.showerror(
-                "Webhook Test",
-                "Failed to send the test message. Double-check the URL and your connection\u2014see the Dashboard logs for details.",
-            )
+            QtWidgets.QMessageBox.critical(
+                self, "Webhook Test",
+                "Failed to send the test message. Double-check the URL and your connection—see the "
+                "Dashboard logs for details.")
 
+    # Legacy no-op shims (kept for external callers).
     def start_sniping(self):
-        # Legacy method - redirect to universal toggle
         if not self.is_running:
             self.toggle_universal()
 
     def pause_sniping(self):
-        # Legacy method - redirect to universal toggle
         if self.is_running:
             self.toggle_universal()
 
     def start_scanner(self):
-        # Legacy method - handled by universal toggle
         pass
 
     def stop_scanner(self):
-        # Legacy method - handled by universal toggle
         pass
 
+    # ------------------------------------------------------------------
+    # Servers management
+    # ------------------------------------------------------------------
     def add_guild_entry(self):
-        """Add a new guild+channels entry card"""
-        entry_frame = ctk.CTkFrame(self.guild_scroll_frame, fg_color=THEME["card"], corner_radius=10,
-                                    border_width=1, border_color=THEME["card_border"])
-        entry_frame.pack(fill="x", padx=4, pady=6)
+        card = QtWidgets.QFrame()
+        card.setObjectName("innerCard")
+        cv = QtWidgets.QVBoxLayout(card)
+        cv.setContentsMargins(12, 10, 12, 10)
+        cv.setSpacing(6)
 
-        top_row = ctk.CTkFrame(entry_frame, fg_color="transparent")
-        top_row.pack(fill="x", padx=12, pady=(10, 0))
+        top = QtWidgets.QHBoxLayout()
+        name_entry = self._line_edit("Server Name (Optional)")
+        top.addWidget(name_entry, 1)
+        remove_btn = QtWidgets.QPushButton("✕")
+        remove_btn.setObjectName("iconGhost")
+        remove_btn.setFixedSize(26, 26)
+        remove_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        top.addWidget(remove_btn)
+        cv.addLayout(top)
 
-        name_entry = ctk.CTkEntry(top_row, placeholder_text="Server Name (Optional)", fg_color=THEME["bg_alt"],
-                                   border_color=THEME["card_border"], height=30)
-        name_entry.pack(side="left", fill="x", expand=True)
+        guild_entry = self._line_edit("Server ID")
+        channels_entry = self._line_edit("Channel IDs (comma-separated)")
+        categories_entry = self._line_edit("Category IDs (comma-separated)")
+        cv.addWidget(guild_entry)
+        cv.addWidget(channels_entry)
+        cv.addWidget(categories_entry)
 
-        remove_btn = ctk.CTkButton(top_row, text="✕", width=26, height=26, font=ctk.CTkFont(size=11),
-                                    fg_color="transparent", hover_color=THEME["danger"],
-                                    text_color=THEME["text_dim"],
-                                    command=lambda: self.remove_guild_entry(entry_frame))
-        remove_btn.pack(side="left", padx=(8, 0))
-
-        guild_entry = self._server_field(entry_frame, "Server ID")
-        channels_entry = self._server_field(entry_frame, "Channel IDs (comma-separated)")
-        categories_entry = self._server_field(entry_frame, "Category IDs (comma-separated)", last=True)
-
-        self.guild_entries.append({
-            "frame": entry_frame,
+        entry = {
+            "frame": card,
             "name": name_entry,
             "guild": guild_entry,
             "channels": channels_entry,
             "categories": categories_entry,
-        })
+        }
+        remove_btn.clicked.connect(lambda: self.remove_guild_entry(entry))
+        self.guild_layout.addWidget(card)
+        self.guild_entries.append(entry)
 
-    def remove_guild_entry(self, frame=None):
-        """Remove a specific guild entry card (or the last one if none given)"""
-        if len(self.guild_entries) <= 1:  # Keep at least one
+    def remove_guild_entry(self, entry=None):
+        if len(self.guild_entries) <= 1:
             print("[UI] Cannot remove the last server entry")
             return
+        if entry is None:
+            entry = self.guild_entries[-1]
+        if entry not in self.guild_entries:
+            return
+        self.guild_entries.remove(entry)
+        entry["frame"].setParent(None)
+        entry["frame"].deleteLater()
 
-        if frame is None:
-            entry = self.guild_entries.pop()
-        else:
-            entry = next((e for e in self.guild_entries if e["frame"] == frame), None)
-            if entry is None:
-                return
-            self.guild_entries.remove(entry)
+    def _collect_guild_mappings(self):
+        guild_mappings = []
+        for entry in self.guild_entries:
+            server_name = entry["name"].text().strip()
+            guild_id = entry["guild"].text().strip()
+            channels_str = entry["channels"].text().strip()
+            categories_str = entry["categories"].text().strip()
+            if guild_id:
+                channel_ids = [ch.strip() for ch in channels_str.split(',') if ch.strip()]
+                category_ids = [cat.strip() for cat in categories_str.split(',') if cat.strip()]
+                guild_mappings.append({
+                    "server_name": server_name,
+                    "guild_id": guild_id,
+                    "channel_ids": channel_ids,
+                    "category_ids": category_ids,
+                })
+        return guild_mappings
 
-        entry["frame"].destroy()
-
+    # ------------------------------------------------------------------
+    # Settings load / save
+    # ------------------------------------------------------------------
     def load_settings(self):
-        """Load settings from LOCALAPPDATA and populate UI"""
         settings = load_settings_from_file()
         if not settings:
             print("[Settings] No saved settings found, using defaults")
             self.priority_board.seed_defaults()
-            self.priority_board.render()
             self.apply_hotkeys()
             return
 
+        self._loading = True
         try:
-            # Load resolution and speed (Pathing Mode)
             if 'resolution' in settings:
-                self.res_dropdown.set(settings['resolution'])
+                self.res_dropdown.setCurrentText(settings['resolution'])
 
             if 'speed' in settings:
                 saved_speed = settings['speed']
-                # Migrate older speed values to new pathing options
                 if saved_speed == "VIP":
                     saved_speed = "Vip Pathing"
                 elif saved_speed == "Normal":
                     saved_speed = "Non Vip Pathing"
-                self.speed_dropdown.set(saved_speed)
+                self.speed_dropdown.setCurrentText(saved_speed)
 
             selected_path = settings.get('selected_path', 1)
             try:
-                selected_path = min(5, max(1, int(selected_path)))
+                selected_path = min(12, max(1, int(selected_path)))
             except (TypeError, ValueError):
                 selected_path = 1
-            self.path_dropdown.set(f"Path {selected_path}")
+            self.path_dropdown.setCurrentText(f"Path {selected_path}")
             fish_loop.select_path(selected_path - 1)
 
-            # Load tokens
             if 'rb_token' in settings:
-                self.rb_token_entry.delete(0, 'end')
-                self.rb_token_entry.insert(0, settings['rb_token'])
-
+                self.rb_token_entry.setText(settings['rb_token'])
             if 'ds_token' in settings:
-                self.ds_token_entry.delete(0, 'end')
-                self.ds_token_entry.insert(0, settings['ds_token'])
-
+                self.ds_token_entry.setText(settings['ds_token'])
             if 'webhook_url' in settings:
-                self.ds_webhook_entry.delete(0, 'end')
-                self.ds_webhook_entry.insert(0, settings['webhook_url'])
-
+                self.ds_webhook_entry.setText(settings['webhook_url'])
             if 'discord_ping_user_id' in settings:
-                self.ds_ping_user_id_entry.delete(0, 'end')
-                self.ds_ping_user_id_entry.insert(0, settings['discord_ping_user_id'])
-
+                self.ds_ping_user_id_entry.setText(settings['discord_ping_user_id'])
             if 'max_catches' in settings:
-                self.max_catches_entry.delete(0, 'end')
-                self.max_catches_entry.insert(0, str(settings['max_catches']))
-
+                self.max_catches_entry.setText(str(settings['max_catches']))
             if 'sell_loops' in settings:
-                self.sell_loops_entry.delete(0, 'end')
-                self.sell_loops_entry.insert(0, str(settings['sell_loops']))
+                self.sell_loops_entry.setText(str(settings['sell_loops']))
 
-            if settings.get('sell_on_start', True):
-                self.sell_on_start_switch.select()
-            else:
-                self.sell_on_start_switch.deselect()
+            self.sell_on_start_switch.setChecked(bool(settings.get('sell_on_start', True)))
 
             anti_afk_interval = settings.get('anti_afk_interval', 300)
-            self.anti_afk_interval_entry.delete(0, 'end')
-            self.anti_afk_interval_entry.insert(0, str(anti_afk_interval))
+            self.anti_afk_interval_entry.setText(str(anti_afk_interval))
             fish_loop.set_anti_afk_interval(anti_afk_interval)
 
-            self.start_hotkey_entry.delete(0, 'end')
-            self.start_hotkey_entry.insert(0, settings.get('start_hotkey', DEFAULT_START_HOTKEY))
-            self.stop_hotkey_entry.delete(0, 'end')
-            self.stop_hotkey_entry.insert(0, settings.get('stop_hotkey', DEFAULT_STOP_HOTKEY))
+            self.start_hotkey_entry.setText(settings.get('start_hotkey', DEFAULT_START_HOTKEY))
+            self.stop_hotkey_entry.setText(settings.get('stop_hotkey', DEFAULT_STOP_HOTKEY))
             self.apply_hotkeys()
 
-            # Load auto-buy settings
-            if settings.get('buy_master_enabled', False):
-                self.buy_master_switch.select()
-            else:
-                self.buy_master_switch.deselect()
+            self.buy_master_switch.setChecked(bool(settings.get('buy_master_enabled', False)))
 
             saved_buy_items = settings.get('buy_item_settings', {})
             for item in fishing.BUY_ITEMS:
@@ -1515,19 +2011,11 @@ class FishSniperUI(ctk.CTk):
                 switch = self.buy_switches.get(name)
                 entry = self.buy_qty_entries.get(name)
                 if switch is not None:
-                    if saved.get("enabled"):
-                        switch.select()
-                    else:
-                        switch.deselect()
+                    switch.setChecked(bool(saved.get("enabled")))
                 if entry is not None:
                     qty = max(0, min(int(saved.get("quantity", 0) or 0), item["max_qty"]))
-                    entry.delete(0, 'end')
-                    entry.insert(0, str(qty))
+                    entry.setText(str(qty))
 
-            # Purchase timestamps were persisted as ISO strings — parse
-            # back into timezone-aware datetimes so restock comparisons
-            # work correctly. Any entry that fails to parse is skipped
-            # rather than crashing the whole settings load.
             last_purchased = {}
             for name, iso_str in settings.get('last_purchased', {}).items():
                 try:
@@ -1540,152 +2028,118 @@ class FishSniperUI(ctk.CTk):
             fish_loop.set_buy_settings(buy_master_enabled, buy_item_settings)
             self.refresh_buy_status_labels()
 
-            # Restore accumulated time-in-biome totals (values are already
-            # plain seconds, JSON-serializable as-is — no parsing needed).
             saved_biome_times = settings.get('biome_time_totals', {})
             scanner.biome_time_totals = {
                 biome: float(seconds) for biome, seconds in saved_biome_times.items()
             }
             self.refresh_biome_time_labels()
 
-            # Load selected biomes
+            for row in list(self.auto_item_rows):
+                row["frame"].setParent(None)
+                row["frame"].deleteLater()
+            self.auto_item_rows = []
+            for item_config in settings.get('auto_items', []):
+                self.add_auto_item_row(item_config)
+            self._update_auto_item_count_label()
+
+            for row in list(self.gauntlet_rows):
+                row["frame"].setParent(None)
+                row["frame"].deleteLater()
+            self.gauntlet_rows = []
+            for gauntlet_name, gauntlet_config in settings.get('gauntlets', {}).items():
+                row_config = dict(gauntlet_config)
+                row_config["name"] = gauntlet_name
+                self.add_gauntlet_row(row_config)
+            self._update_gauntlet_count_label()
+
+            gauntlet_names = self._gauntlet_names()
+            self.refresh_gauntlet_dropdown_options()
+            saved_gauntlet_default = settings.get('gauntlet_default')
+            self.gauntlet_default_dropdown.setCurrentText(
+                saved_gauntlet_default if saved_gauntlet_default in gauntlet_names else "None")
+            saved_gauntlet_biome_map = settings.get('gauntlet_biome_map', {})
+            for biome, dropdown in self.gauntlet_biome_dropdowns.items():
+                mapped = saved_gauntlet_biome_map.get(biome)
+                dropdown.setCurrentText(mapped if mapped in gauntlet_names else "Default")
+
+            gauntlets, gauntlet_default, gauntlet_biome_map = self.get_gauntlet_settings()
+            fish_loop.set_gauntlet_settings(gauntlets, gauntlet_default, gauntlet_biome_map)
+
             if 'selected_biomes' in settings:
                 for biome in BIOMES:
-                    switch = self.biome_switches[biome]
-                    if biome in settings['selected_biomes']:
-                        switch.select()
-                    else:
-                        switch.deselect()
+                    self.biome_switches[biome].setChecked(biome in settings['selected_biomes'])
 
-            # Load per-biome fishing-enabled toggles (default enabled if
-            # absent, e.g. an older settings file saved before this feature
-            # existed).
             saved_fishing_enabled = settings.get('fishing_enabled_biomes', {})
             for biome, switch in self.fish_switches.items():
-                if saved_fishing_enabled.get(biome, True):
-                    switch.select()
-                else:
-                    switch.deselect()
+                switch.setChecked(bool(saved_fishing_enabled.get(biome, True)))
 
-            # Load check-in screenshot settings (defaults if absent, e.g. an
-            # older settings file saved before delays were configurable —
-            # that older format stored a plain bool per biome instead of
-            # {"enabled":, "delay":}, so both are handled here).
             saved_checkin = settings.get('checkin_screenshots', {})
             for biome, switch in self.checkin_switches.items():
                 default_config = DEFAULT_CHECKIN_SCREENSHOT_CONFIG.get(
                     biome, {"enabled": False, "delay": DEFAULT_CHECKIN_DELAY})
                 saved = saved_checkin.get(biome, default_config)
-
                 if isinstance(saved, dict):
                     enabled = saved.get("enabled", default_config["enabled"])
                     delay = saved.get("delay", default_config["delay"])
                 else:
-                    # Old format: a plain bool.
                     enabled = bool(saved)
                     delay = default_config["delay"]
-
-                if enabled:
-                    switch.select()
-                else:
-                    switch.deselect()
-
+                switch.setChecked(bool(enabled))
                 delay_entry = self.checkin_delay_entries.get(biome)
                 if delay_entry is not None:
-                    delay_entry.delete(0, 'end')
-                    delay_entry.insert(0, str(delay))
+                    delay_entry.setText(str(delay))
 
-            # Load guild mappings into the guild entries
-            if 'guild_mappings' in settings and settings['guild_mappings']:
+            if settings.get('guild_mappings'):
                 while len(self.guild_entries) > 1:
                     self.remove_guild_entry()
-
                 for i, mapping in enumerate(settings['guild_mappings']):
                     if i >= len(self.guild_entries):
                         self.add_guild_entry()
-
                     entry = self.guild_entries[i]
+                    entry["name"].setText(mapping.get('server_name', mapping.get('name', '')))
+                    entry["guild"].setText(str(mapping.get('guild_id', '')))
+                    entry["channels"].setText(', '.join(map(str, mapping.get('channel_ids', []))))
+                    entry["categories"].setText(', '.join(map(str, mapping.get('category_ids', []))))
 
-                    name_val = mapping.get('server_name', mapping.get('name', ''))
-                    entry["name"].delete(0, 'end')
-                    entry["name"].insert(0, name_val)
-
-                    if 'guild_id' in mapping:
-                        entry["guild"].delete(0, 'end')
-                        entry["guild"].insert(0, mapping['guild_id'])
-
-                    if 'channel_ids' in mapping:
-                        channels = ', '.join(map(str, mapping['channel_ids']))
-                        entry["channels"].delete(0, 'end')
-                        entry["channels"].insert(0, channels)
-
-                    if 'category_ids' in mapping:
-                        categories = ', '.join(map(str, mapping['category_ids']))
-                        entry["categories"].delete(0, 'end')
-                        entry["categories"].insert(0, categories)
-                    else:
-                        entry["categories"].delete(0, 'end')
-
-            # Load priority board data
             biome_priority_levels = settings.get('biome_priority_levels')
             num_tiers = settings.get('num_tiers', 3)
             if biome_priority_levels:
                 self.priority_board.load_data(biome_priority_levels, num_tiers)
             else:
                 self.priority_board.seed_defaults()
-                self.priority_board.render()
 
             print("[Settings] Settings loaded successfully from LOCALAPPDATA")
         except Exception as e:
             print(f"[Settings Load Error] Error loading settings: {e}")
             self.priority_board.render()
             self.apply_hotkeys()
-
-    def _collect_guild_mappings(self):
-        guild_mappings = []
-        for entry in self.guild_entries:
-            server_name = entry["name"].get().strip()
-            guild_id = entry["guild"].get().strip()
-            channels_str = entry["channels"].get().strip()
-            categories_str = entry["categories"].get().strip()
-
-            if guild_id:  # Only add if guild ID is provided
-                channel_ids = [ch.strip() for ch in channels_str.split(',') if ch.strip()]
-                category_ids = [cat.strip() for cat in categories_str.split(',') if cat.strip()]
-
-                guild_mappings.append({
-                    "server_name": server_name,
-                    "guild_id": guild_id,
-                    "channel_ids": channel_ids,
-                    "category_ids": category_ids
-                })
-        return guild_mappings
+        finally:
+            self._loading = False
 
     def save_settings(self, value=None):
-        rb_token = self.rb_token_entry.get().strip()  # Cookie
-        ds_token = self.ds_token_entry.get().strip()  # User Token
-        webhook_url = self.ds_webhook_entry.get().strip()
-        ping_user_id = self.ds_ping_user_id_entry.get().strip()
-        res = self.res_dropdown.get()
-        speed = self.speed_dropdown.get()
+        if self._loading:
+            return
+        rb_token = self.rb_token_entry.text().strip()
+        ds_token = self.ds_token_entry.text().strip()
+        webhook_url = self.ds_webhook_entry.text().strip()
+        ping_user_id = self.ds_ping_user_id_entry.text().strip()
+        res = self.res_dropdown.currentText()
+        speed = self.speed_dropdown.currentText()
 
         try:
-            max_catches = int(self.max_catches_entry.get().strip() or "1")
+            max_catches = int(self.max_catches_entry.text().strip() or "1")
         except ValueError:
             max_catches = 1
-
         try:
-            sell_loops = int(self.sell_loops_entry.get().strip() or "56")
+            sell_loops = int(self.sell_loops_entry.text().strip() or "56")
         except ValueError:
             sell_loops = 56
-
         try:
-            selected_path = int(self.path_dropdown.get().rsplit(" ", 1)[1])
+            selected_path = int(self.path_dropdown.currentText().rsplit(" ", 1)[1])
         except (IndexError, ValueError):
             selected_path = 1
-
         try:
-            anti_afk_interval = max(1, int(self.anti_afk_interval_entry.get().strip() or "300"))
+            anti_afk_interval = max(1, int(self.anti_afk_interval_entry.text().strip() or "300"))
         except ValueError:
             anti_afk_interval = 300
 
@@ -1697,31 +2151,27 @@ class FishSniperUI(ctk.CTk):
         buy_master_enabled, buy_item_settings = self.get_buy_settings()
         fish_loop.set_buy_settings(buy_master_enabled, buy_item_settings)
 
-        # Gather chosen biomes
         selected_biomes = self.get_enabled_biomes()
-
-        # Parse all guild entries and convert to mappings
         guild_mappings = self._collect_guild_mappings()
-
         biome_priority_levels = dict(self.priority_board.assignments)
         num_tiers = self.priority_board.num_tiers
         checkin_screenshots = self.get_checkin_screenshot_settings()
         fishing_enabled_biomes = self.get_fishing_enabled_settings()
+        auto_items = self.get_auto_item_settings()
 
-        # Sync values inside running Scanner Thread instance
+        gauntlets, gauntlet_default, gauntlet_biome_map = self.get_gauntlet_settings()
+        fish_loop.set_gauntlet_settings(gauntlets, gauntlet_default, gauntlet_biome_map)
+
         scanner.load_settings(ds_token, selected_biomes, rb_token, guild_mappings, webhook_url, self,
                                biome_priority_levels, discord_ping_user_id=ping_user_id,
                                checkin_screenshots=checkin_screenshots,
-                               fishing_enabled_biomes=fishing_enabled_biomes)
+                               fishing_enabled_biomes=fishing_enabled_biomes,
+                               auto_items=auto_items)
 
-        # datetime objects in last_purchased aren't JSON-serializable, so
-        # persist them as ISO-format strings (timezone-aware, round-trips
-        # cleanly through datetime.fromisoformat on load).
         last_purchased_serialized = {
             name: dt.isoformat() for name, dt in fish_loop.last_purchased.items()
         }
 
-        # Save settings to LOCALAPPDATA
         settings_data = {
             'resolution': res,
             'speed': speed,
@@ -1737,15 +2187,19 @@ class FishSniperUI(ctk.CTk):
             'biome_priority_levels': biome_priority_levels,
             'num_tiers': num_tiers,
             'checkin_screenshots': checkin_screenshots,
-            'sell_on_start': self.sell_on_start_switch.get() == 1,
+            'sell_on_start': self.sell_on_start_switch.isChecked(),
             'fishing_enabled_biomes': fishing_enabled_biomes,
             'anti_afk_interval': anti_afk_interval,
-            'start_hotkey': self.start_hotkey_entry.get().strip() or DEFAULT_START_HOTKEY,
-            'stop_hotkey': self.stop_hotkey_entry.get().strip() or DEFAULT_STOP_HOTKEY,
+            'start_hotkey': self.start_hotkey_entry.text().strip() or DEFAULT_START_HOTKEY,
+            'stop_hotkey': self.stop_hotkey_entry.text().strip() or DEFAULT_STOP_HOTKEY,
             'buy_master_enabled': buy_master_enabled,
             'buy_item_settings': buy_item_settings,
             'last_purchased': last_purchased_serialized,
             'biome_time_totals': scanner.biome_time_totals,
+            'auto_items': auto_items,
+            'gauntlets': gauntlets,
+            'gauntlet_default': gauntlet_default,
+            'gauntlet_biome_map': gauntlet_biome_map,
         }
         save_settings_to_file(settings_data)
 
@@ -1763,19 +2217,23 @@ class FishSniperUI(ctk.CTk):
             print(f"[FishSniper] Note: these enabled biomes still need a priority tier: {', '.join(unassigned)}")
 
     def initialize_scanner(self):
-        """Initialize scanner with current settings and UI reference"""
-        rb_token = self.rb_token_entry.get().strip()
-        ds_token = self.ds_token_entry.get().strip()
-        webhook_url = self.ds_webhook_entry.get().strip()
-        ping_user_id = self.ds_ping_user_id_entry.get().strip()
+        rb_token = self.rb_token_entry.text().strip()
+        ds_token = self.ds_token_entry.text().strip()
+        webhook_url = self.ds_webhook_entry.text().strip()
+        ping_user_id = self.ds_ping_user_id_entry.text().strip()
         selected_biomes = self.get_enabled_biomes()
 
         guild_mappings = self._collect_guild_mappings()
         biome_priority_levels = dict(self.priority_board.assignments)
         checkin_screenshots = self.get_checkin_screenshot_settings()
         fishing_enabled_biomes = self.get_fishing_enabled_settings()
+        auto_items = self.get_auto_item_settings()
+
+        gauntlets, gauntlet_default, gauntlet_biome_map = self.get_gauntlet_settings()
+        fish_loop.set_gauntlet_settings(gauntlets, gauntlet_default, gauntlet_biome_map)
 
         scanner.load_settings(ds_token, selected_biomes, rb_token, guild_mappings, webhook_url, self,
                                biome_priority_levels, discord_ping_user_id=ping_user_id,
                                checkin_screenshots=checkin_screenshots,
-                               fishing_enabled_biomes=fishing_enabled_biomes)
+                               fishing_enabled_biomes=fishing_enabled_biomes,
+                               auto_items=auto_items)

@@ -122,7 +122,7 @@ def extract_urls(message):
             for component in row.children:
                 if hasattr(component, "url") and component.url:
                     web_urls.append(component.url)
-    return [url.strip("`") for url in dict.fromkeys(protocol_urls + web_urls)]
+    return list(dict.fromkeys(protocol_urls + web_urls))
 
 
 def normalize_biome_name(name):
@@ -523,16 +523,59 @@ def _parse_roblox_link(raw_url: str):
     return place_id, link_code, None, None
 
 
+def _resolve_share_code(share_code: str):
+    """
+    Uses Roblox's share-links API to resolve a share code into:
+    (place_id, link_code) or (None, None) on failure.
+    """
+    try:
+        url = f"https://apis.roblox.com/share-links/v1/share-links/{share_code}"
+        res = requests.get(url, timeout=10)
+        if res.status_code != 200:
+            print(f"[Roblox Launcher] Share-links API HTTP {res.status_code}")
+            return None, None
+
+        data = res.json()
+        # Typical structure:
+        # {
+        #   "targetType": "Experience",
+        #   "targetId": 15532962292,
+        #   "linkType": "ExperienceInvite",
+        #   "data": {
+        #       "placeId": 15532962292,
+        #       "privateServerLinkCode": "XXXX-XXXX"
+        #   }
+        # }
+        target_id = data.get("targetId")
+        payload = data.get("data", {}) or {}
+        place_id = str(payload.get("placeId") or target_id or "")
+        link_code = payload.get("privateServerLinkCode") or payload.get("joinCode")
+
+        if not place_id or not link_code:
+            print("[Roblox Launcher] Share-links API returned incomplete data.")
+            return None, None
+
+        print(
+            f"[Roblox Launcher] Resolved share code {share_code} → "
+            f"placeId={place_id}, linkCode={link_code}"
+        )
+        return place_id, link_code
+
+    except Exception as e:
+        print(f"[Roblox Launcher] Error resolving share code via API: {e}")
+        return None, None
+
+
 def _launch_deeplink(place_id: str, link_code: str):
     """
     Last-resort deep link launcher. Works if Roblox is installed and
     registered as a URL handler. Uses the modern
-    roblox://experiences/start?placeId=...&linkCode=... scheme
+    roblox://experiences/start?placeId=...&privateServerLinkCode=... scheme
     — the older roblox://placeID=...&linkCode=... form isn't reliably
     recognized by current Roblox clients, which was silently breaking
     private-server launches every time this fallback got used.
     """
-    url = f"roblox://experiences/start?placeId={place_id}&linkCode={link_code}"
+    url = f"roblox://experiences/start?placeId={place_id}&privateServerLinkCode={link_code}"
     print(f"[Roblox Launcher] Launching via deep link: {url}")
     os.startfile(url)
     return True
@@ -651,17 +694,16 @@ def resolve_and_launch_with_cookie(raw_url, cookie):
 
     # If we only have a share code, resolve it via Roblox API
     if share_code and (not place_id or not link_code):
-        print(f"[Roblox Launcher] Detected Share Code: {share_code}. Using deep‑link launcher.")
-        url = f"roblox://navigation/share_links?code={share_code}&type=Server"
-        os.startfile(url)
-        return True
-
+        print(f"[Roblox Launcher] Detected Share Code: {share_code}. Resolving via Roblox API...")
+        r_place, r_link = _resolve_share_code(share_code)
+        if r_place and r_link:
+            place_id, link_code = r_place, r_link
 
     # If still missing place/link, try a last-resort share deep link
     if not place_id or not link_code:
         if share_code:
             url = f"roblox://navigation/share_links?code={share_code}&type=Server"
-            print(f"[Roblox Launcher] Launching Share Deep Link: {url}")
+            print(f"[Roblox Launcher] Could not fully resolve IDs. Falling back to Share Deep Link: {url}")
             os.startfile(url)
             return True
         else:
@@ -675,8 +717,82 @@ def resolve_and_launch_with_cookie(raw_url, cookie):
         print("[Roblox Launcher] Failed to extract any valid Roblox joining data from the URL.")
         return False
 
-    print(f"Launching deeplink to server `roblox://experiences/start?placeId={place_id}&linkCode={link_code}`")
-    return _launch_deeplink(place_id, link_code)
+    # At this point we have place_id + link_code
+    # If no cookie, just use deep link
+    if not cookie or cookie.strip() == "":
+        return _launch_deeplink(place_id, link_code)
+
+    # Cookie-based auth ticket flow
+    try:
+        session = requests.Session()
+        session.cookies[".ROBLOSECURITY"] = cookie.strip()
+
+        # First call to get X-CSRF
+        csrf_res = session.post("https://auth.roblox.com/v1/authentication-ticket")
+        csrf_token = csrf_res.headers.get("x-csrf-token")
+
+
+        if not csrf_token:
+            # Try legacy xsrf endpoint as backup
+            xsrf_res = session.post("https://api.roblox.com/v1/xsrf-token")
+            csrf_token = xsrf_res.headers.get("x-csrf-token")
+            csrf_res = xsrf_res
+
+        if not csrf_token:
+            print(
+                "[Roblox Launcher] Failed to obtain X-CSRF token: "
+                f"{_roblox_error_detail(csrf_res)}. Falling back to deep link."
+            )
+            return _launch_deeplink(place_id, link_code)
+
+        headers = {
+            "X-CSRF-TOKEN": csrf_token,
+            "Referer": "https://www.roblox.com",
+            "Content-Type": "application/json",
+        }
+
+        ticket_res = session.post(
+            "https://auth.roblox.com/v1/authentication-ticket",
+            headers=headers,
+            json={},
+        )
+        ticket = ticket_res.headers.get("rbx-authentication-ticket")
+
+
+        if not ticket:
+            print(
+                "[Roblox Launcher] Roblox did not issue an authentication ticket: "
+                f"{_roblox_error_detail(ticket_res)}. Falling back to deep link."
+            )
+            return _launch_deeplink(place_id, link_code)
+
+        launcher_url = (
+            "https://assetgame.roblox.com/game/PlaceLauncher.ashx"
+            f"?request=RequestGame&placeId={place_id}"
+            f"&isPlayTogetherGame=false&privateServerLinkCode={link_code}"
+        )
+        encoded_launcher_url = urllib.parse.quote(launcher_url)
+
+        launch_time = int(time.time() * 1000)
+        launch_str = (
+            "roblox:1"
+            f"+launchmode:play"
+            f"+gameinfo:{ticket}"
+            f"+launchtime:{launch_time}"
+            f"+placelauncherurl:{encoded_launcher_url}"
+            "+robloxLocale:en_us"
+            "+gameLocale:en_us"
+            "+channel:"
+        )
+
+        print("[Roblox Launcher] Launching Roblox using Cookie Auth + PlaceLauncher...")
+        os.startfile(launch_str)
+        return True
+
+    except Exception as e:
+        print(f"[Roblox Launcher] Fatal error during resolution/launch: {e}")
+        print("[Roblox Launcher] Falling back to deep link.")
+        return _launch_deeplink(place_id, link_code)
 
 
 class Scanner(discord.Client):
@@ -709,6 +825,13 @@ class Scanner(discord.Client):
         self._checkin_followup_stop_event = None  # identity of the stop_event we've already scheduled a follow-up for
         self.checkin_screenshot_settings = {}  # {normalized_biome_name: {"enabled": bool, "delay": seconds}}
         self.fishing_enabled_biomes = {}  # {normalized_biome_name: bool}; missing entries default to enabled
+        self.auto_items = []  # [{"enabled": bool, "name": str, "quantity": int, "biomes": [biome_title, ...]}]
+        # At most one automation-driven action (a join, or the disconnect
+        # recovery rejoin) that got deferred because a gauntlet swap was in
+        # progress when it would otherwise have fired. Only the action that
+        # would actually change what's on screen needs to wait — see
+        # _launch_and_track_join() and _rejoin_random_public_server().
+        self._deferred_action = None
         self.log_watchdog_thread = None
         self.log_watchdog_stop = None
 
@@ -804,40 +927,78 @@ class Scanner(discord.Client):
                     
                     if len(urls) > 0:
                         raw_url = urls[0] # Grab the first link found
-                        
-                        if self.fish_loop:
-                            self.fish_loop.toggle_off()
-                        
-                        # Let Roblox resolve it and launch!
-                        success = resolve_and_launch_with_cookie(raw_url, self.roblox_cookie)
-                        
-                        if success and self.fish_loop:
-                            self.fish_loop.begin_server_session()
-                            self.fish_loop.prepare_for_server_join()
-                            # Apply the expected biome's fishing toggle now,
-                            # from the Discord message itself, rather than
-                            # waiting for log confirmation (which can take
-                            # 20+ seconds) — otherwise the bot would still
-                            # walk to the spot and sell before finding out
-                            # it should have just sat at spawn instead.
-                            # _confirm_biome_session() re-applies this once
-                            # the real biome is confirmed from the logs, in
-                            # case this guess needs correcting.
-                            expected_norm = normalize_biome_name(canonical_new_biome)
-                            self.fish_loop.set_biome_fishing_enabled(
-                                self.fishing_enabled_biomes.get(expected_norm, True)
+
+                        if self.fish_loop and self.fish_loop.gauntlet_swap_in_progress:
+                            # A gauntlet swap is atomic and uninterruptible by
+                            # design — launching a new server mid-swap would
+                            # pull the game state out from under it (a fresh
+                            # load screen appearing over the still-open
+                            # inventory), so this join waits for the swap to
+                            # finish instead of firing immediately.
+                            print(
+                                "[Discord Scanner] Gauntlet swap in progress — deferring this join "
+                                "until it finishes."
                             )
-                            self.fish_loop.toggle_on(reset_initial_pathing=False)
-                        
-                        if success:
-                            self.pending_join_url = raw_url
-                            self.pending_join_is_priority_interrupt = is_priority_interrupt
-                            self.pending_join_detected_at = message_detected_at
-                            self._start_log_monitor(biome)
-                        
+                            self._deferred_action = {
+                                "type": "join",
+                                "raw_url": raw_url,
+                                "biome": biome,
+                                "canonical_new_biome": canonical_new_biome,
+                                "is_priority_interrupt": is_priority_interrupt,
+                                "message_detected_at": message_detected_at,
+                            }
+                            return
+
+                        self._launch_and_track_join(
+                            raw_url, biome, canonical_new_biome, is_priority_interrupt, message_detected_at
+                        )
                         return
                     else:
                         print(f"[Discord Scanner] Biome '{biome}' started, but no links were found in the message.")
+
+    def _launch_and_track_join(self, raw_url, biome, canonical_new_biome, is_priority_interrupt,
+                                message_detected_at):
+        """Resolves and launches a join, and sets up everything that
+        depends on it (fishing toggle, auto-items, log monitoring). Called
+        directly from on_message for a normal join, or later by
+        handle_gauntlet_swap_finished() if it had to be deferred."""
+        if self.fish_loop:
+            self.fish_loop.toggle_off()
+
+        # Let Roblox resolve it and launch!
+        success = resolve_and_launch_with_cookie(raw_url, self.roblox_cookie)
+
+        if success and self.fish_loop:
+            self.fish_loop.begin_server_session()
+            self.fish_loop.prepare_for_server_join()
+            # Apply the expected biome's fishing toggle now, from the
+            # Discord message itself, rather than waiting for log
+            # confirmation (which can take 20+ seconds) — otherwise the bot
+            # would still walk to the spot and sell before finding out it
+            # should have just sat at spawn instead. _confirm_biome_session()
+            # re-applies this once the real biome is confirmed from the
+            # logs, in case this guess needs correcting.
+            expected_norm = normalize_biome_name(canonical_new_biome)
+            self.fish_loop.set_biome_fishing_enabled(
+                self.fishing_enabled_biomes.get(expected_norm, True)
+            )
+            # Same reasoning applies to auto-items: resolve against the
+            # expected biome now, since they need to run before pathing
+            # starts — long before log confirmation would ever arrive.
+            matched_auto_items = [
+                {"name": item["name"], "quantity": item["quantity"]}
+                for item in self.auto_items
+                if item.get("enabled")
+                and expected_norm in {normalize_biome_name(b) for b in item.get("biomes", [])}
+            ]
+            self.fish_loop.set_pending_auto_items(matched_auto_items)
+            self.fish_loop.toggle_on(reset_initial_pathing=False)
+
+        if success:
+            self.pending_join_url = raw_url
+            self.pending_join_is_priority_interrupt = is_priority_interrupt
+            self.pending_join_detected_at = message_detected_at
+            self._start_log_monitor(biome)
 
     def _interrupt_for_priority_biome(self, old_biome, new_biome):
         """
@@ -1083,6 +1244,8 @@ class Scanner(discord.Client):
         self.log_biome_confirmed = True
         self.active_biome_session = biome
         print(f"[Log Scanner] Confirmed active biome from Roblox logs: {biome}")
+        if self.fish_loop:
+            self.fish_loop.request_gauntlet_for_biome(biome)
         if self.ui_reference:
             self.ui_reference.update_status(f"Fishing in {biome}...")
         if self.webhook_url:
@@ -1214,6 +1377,13 @@ class Scanner(discord.Client):
         than a targeted join) — used to recover when the bot wasn't
         tracking a specific target biome, so there's nothing more specific
         to fall back on, but the Roblox log has still gone stale."""
+        if self.fish_loop and self.fish_loop.gauntlet_swap_in_progress:
+            # Same reasoning as the join case above: a gauntlet swap can't
+            # tolerate the game state changing out from under it.
+            print("[Discord Scanner] Gauntlet swap in progress — deferring the recovery rejoin until it finishes.")
+            self._deferred_action = {"type": "rejoin_public"}
+            return
+
         if self.fish_loop:
             self.fish_loop.toggle_off()
 
@@ -1233,6 +1403,28 @@ class Scanner(discord.Client):
 
         if self.ui_reference:
             self.ui_reference.update_status("Reconnecting to a public server...")
+
+    def handle_gauntlet_swap_finished(self):
+        """Called by fish_loop once a gauntlet swap finishes — whether it
+        completed normally or was cut short by a user stop. Applies
+        whatever automation-driven action, if any, got deferred while the
+        swap's lock was held. At most one action is ever remembered; if
+        several would have fired during the swap, only the most recent
+        matters once it's over."""
+        action = self._deferred_action
+        self._deferred_action = None
+        if not action or not self.is_running:
+            return
+
+        if action["type"] == "join":
+            print(f"[Discord Scanner] Gauntlet swap finished — resuming the deferred join for '{action['biome']}'.")
+            self._launch_and_track_join(
+                action["raw_url"], action["biome"], action["canonical_new_biome"],
+                action["is_priority_interrupt"], action["message_detected_at"],
+            )
+        elif action["type"] == "rejoin_public":
+            print("[Discord Scanner] Gauntlet swap finished — resuming the deferred recovery rejoin.")
+            self._rejoin_random_public_server()
 
     # ------------------------------------------------------------------
     # Time-in-biome tracking — a second continuous, independent thread
@@ -1414,7 +1606,8 @@ class Scanner(discord.Client):
                 self.ui_reference.update_status("Scanning for biomes...")
 
     def load_settings(self, token, biomes, cookie, mappings, webhook_url, ui_ref=None, biome_priority_levels=None,
-                       discord_ping_user_id=None, checkin_screenshots=None, fishing_enabled_biomes=None):
+                       discord_ping_user_id=None, checkin_screenshots=None, fishing_enabled_biomes=None,
+                       auto_items=None):
         self.token = token
         self.selected_biomes = [canonical_biome_title(biome) for biome in biomes]
         self.roblox_cookie = cookie
@@ -1438,6 +1631,8 @@ class Scanner(discord.Client):
             self.fishing_enabled_biomes = {
                 normalize_biome_name(biome): bool(enabled) for biome, enabled in fishing_enabled_biomes.items()
             }
+        if auto_items is not None:
+            self.auto_items = list(auto_items)
 
     def toggle_on(self):
         print("[Discord Scanner] Started")
