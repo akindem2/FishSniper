@@ -159,24 +159,13 @@ def canonical_biome_title(name):
     return BIOME_TITLE_BY_NORMALIZED.get(normalized, name)
 
 
-# Biomes whose thumbnail isn't in the GitHub thumbnails repo use an explicit
-# URL here instead of the derived old_<slug>.png pattern below.
-BIOME_THUMBNAIL_OVERRIDES = {
-    "Incinerator": "https://i.postimg.cc/d39TJqpk/Screenshot-2026-09-05-152914.png",
-}
-
-
 def biome_thumbnail_url(biome_name):
     """
     Thumbnail images live at a fixed GitHub raw-content pattern, keyed by a
     lowercase, underscore-separated slug of the biome's canonical title
     (e.g. "Sand Storm" -> "sand_storm", NOT "sandstorm" — spaces become
     underscores rather than being stripped, unlike normalize_biome_name).
-    A biome present in BIOME_THUMBNAIL_OVERRIDES uses that URL directly.
     """
-    override = BIOME_THUMBNAIL_OVERRIDES.get(canonical_biome_title(biome_name))
-    if override:
-        return override
     slug = (biome_name or "").strip().lower().replace(" ", "_")
     return f"https://raw.githubusercontent.com/akindem2/thumbnails/refs/heads/main/old_{slug}.png"
 
