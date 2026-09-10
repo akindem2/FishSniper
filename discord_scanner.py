@@ -181,6 +181,33 @@ def biome_thumbnail_url(biome_name):
     return f"https://raw.githubusercontent.com/akindem2/thumbnails/refs/heads/main/old_{slug}.png"
 
 
+# Per-biome Discord embed accent colors (int RGB), keyed by canonical title.
+BIOME_EMBED_COLORS = {
+    "Normal": 0xC8DED7,
+    "Snowy": 0xA6FFFF,
+    "Windy": 0x90F6FF,
+    "Rainy": 0x4284FF,
+    "Sand Storm": 0xFFCB81,
+    "Hell": 0x7E1617,
+    "Starfall": 0x6085FF,
+    "Heaven": 0xD6A22D,
+    "Corruption": 0x9143FF,
+    "Null": 0x3B3B3B,
+    "Glitched": 0x209E2A,
+    "Dreamspace": 0xEA9DDA,
+    "Cyberspace": 0x1C3266,
+    "Singularity": 0xD47111,
+    "Blazing Sun": 0xFFFA5C,
+    "Incinerator": 0xE97451,
+}
+
+
+def biome_embed_color(biome_name):
+    """Returns the Discord embed color (int) for a biome, or None if the biome
+    has no configured color (so the caller can fall back to a default)."""
+    return BIOME_EMBED_COLORS.get(canonical_biome_title(biome_name))
+
+
 # Biomes that get an @-ping in their join webhook notification, regardless of
 # what priority tier they're configured with in the UI.
 PING_BIOME_NORMS = {normalize_biome_name(b) for b in ("Glitched", "Dreamspace", "Cyberspace")}
