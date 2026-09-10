@@ -132,19 +132,29 @@ COORDS = {
         },
 
     },
-    # Derived from the 1080p (1920x1080) profile above. The width is identical
-    # (1920), so every x is unchanged; the viewport is 120px taller, so each y
-    # (and each region height) is scaled by 1200/1080 and rounded to the
-    # nearest pixel. AUTO_ITEM / GAUNTLET stay (0, 0) since they're unset at
+    # Derived from the 1080p (1920x1080) profile above.
+    #
+    # FISHING: the fishing HUD is a centered, uniformly-scaled Roblox UI, so
+    # going 1080->1200 it scales by 1200/1080 (=10/9) *about the screen center*
+    # (960, 540). That means x = round(960 + (x-960)*10/9) and y = round(y*10/9)
+    # (region width/height *10/9). Verified against 1920x1200 screenshots: the
+    # minigame meter bar's measured edges match these values (the earlier
+    # x-unchanged guess put the detection pixels ~20px off, so bites/minigames
+    # were never detected).
+    #
+    # Every other section (MERCHANT/START/BUY/...) is edge/corner-anchored, not
+    # center-scaled (center-scaling drives the far-left camera clicks off-screen),
+    # so those keep x unchanged with y scaled by 10/9 -- calculated, not yet
+    # verified in-game. AUTO_ITEM / GAUNTLET stay (0, 0) since they're unset at
     # 1080p too.
     "1920x1200": {
         "FISHING": {
-            "CAST_ROD": (862, 937),
-            "BITE_INDICATOR": (1176, 929),
-            "BAR_COLOR": (955, 852),
-            "CLAIM_FISH": (1113, 380),
-            "ALT_CLAIM_FISH": (1167, 531),
-            "MINIGAME_REGION": (757, 847, 404, 22)
+            "CAST_ROD": (851, 937),
+            "BITE_INDICATOR": (1200, 929),
+            "BAR_COLOR": (954, 852),
+            "CLAIM_FISH": (1130, 380),
+            "ALT_CLAIM_FISH": (1190, 531),
+            "MINIGAME_REGION": (734, 847, 449, 22)
         },
         "MERCHANT": {
             "CAMERA_SETUP_1": (47, 519),
