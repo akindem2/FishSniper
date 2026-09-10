@@ -3,23 +3,28 @@
 # Builds the FishSniper GUI app (entry point: main.py) into a windowed,
 # console-less executable.
 #
-# - CustomTkinter ships its own PyInstaller hook, which bundles its
-#   theme/asset files automatically — no manual `datas` entries needed.
-# - `PIL._tkinter_finder` is listed explicitly in hiddenimports: it's a
-#   dynamic import that PyInstaller can miss, and is needed here because
-#   the UI's biome thumbnails go through CustomTkinter's CTkImage, which
-#   relies on Pillow's ImageTk integration.
+# - The UI is PySide6 (Qt6). PyInstaller's bundled PySide6 hook collects the
+#   Qt libraries and plugins automatically, so no manual datas/hiddenimports
+#   are needed for it. (Biome thumbnails are QPixmaps fetched over the network
+#   at runtime, so nothing image-related needs bundling.)
+# - fishing.py imports humancursor for its mouse-path curve generator. The
+#   humancursor package __init__ also imports WebCursor, which pulls in
+#   selenium (and numpy), so PyInstaller bundles those transitively even
+#   though only the curve math is used. That's expected and inflates the
+#   build; nothing extra is required for it to work.
+# - tkinter / customtkinter are no longer used, so tkinter is excluded to
+#   stop Pillow from dragging it into the bundle.
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=['PIL._tkinter_finder'],
+    hiddenimports=[],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['tkinter'],
     noarchive=False,
     optimize=0,
 )
