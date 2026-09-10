@@ -906,18 +906,25 @@ class Scanner(discord.Client):
         channel_id_str = str(message.channel.id)
         category_id_str = str(getattr(message.channel, "category_id", ""))
 
-        matched_mapping = False
+        matched_mapping = None
         for mapping in self.guild_mappings:
             m_guild = str(mapping.get("guild_id", ""))
             if m_guild and m_guild == guild_id_str:
                 m_channels = [str(cid) for cid in mapping.get("channel_ids", [])]
                 m_categories = [str(cat_id) for cat_id in mapping.get("category_ids", [])]
                 if channel_id_str in m_channels or category_id_str in m_categories:
-                    matched_mapping = True
+                    matched_mapping = mapping
                     break
 
-        if not matched_mapping:
+        if matched_mapping is None:
             return
+
+        # Per-server biome filter: biomes the user unchecked for this server
+        # (Servers tab) are skipped even when globally selected. Stored as
+        # canonical titles; empty = hunt every selected biome (the default).
+        server_excluded = {
+            canonical_biome_title(b) for b in matched_mapping.get("excluded_biomes", [])
+        }
 
         clean_text = extract_text(message)
 
@@ -925,6 +932,8 @@ class Scanner(discord.Client):
             "ended" in clean_text or "test" in clean_text
         ):
             for biome in self.selected_biomes:
+                if canonical_biome_title(biome) in server_excluded:
+                    continue
                 if re.search(r"\b" + re.escape(biome.lower()) + r"\b", clean_text):
                     canonical_new_biome = canonical_biome_title(biome)
                     message_detected_at = time.time()

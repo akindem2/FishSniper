@@ -1918,16 +1918,84 @@ class FishSniperUI(QtWidgets.QMainWindow):
         cv.addWidget(channels_entry)
         cv.addWidget(categories_entry)
 
+        # Per-server biome filter: a collapsible dropdown listing the biomes
+        # currently enabled in the Biomes tab. Unchecking one stops this server
+        # from triggering joins for it. Biomes disabled globally never appear,
+        # so only biomes selected to hunt can be toggled here. Rebuilt each
+        # time it's opened so it reflects the current enabled set.
+        biome_header = QtWidgets.QHBoxLayout()
+        biome_header.addWidget(self._faint("Biomes to hunt for this server"))
+        biome_header.addStretch(1)
+        biome_expand_btn = QtWidgets.QPushButton("⌄")
+        biome_expand_btn.setObjectName("iconGhost")
+        biome_expand_btn.setFixedSize(24, 24)
+        biome_expand_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        biome_header.addWidget(biome_expand_btn)
+        cv.addLayout(biome_header)
+
+        biome_flap = QtWidgets.QFrame()
+        biome_flap.setObjectName("innerCard")
+        biome_flap_layout = QtWidgets.QGridLayout(biome_flap)
+        biome_flap_layout.setContentsMargins(10, 8, 10, 8)
+        biome_flap_layout.setHorizontalSpacing(14)
+        biome_flap_layout.setVerticalSpacing(2)
+        biome_flap.setVisible(False)
+        cv.addWidget(biome_flap)
+
         entry = {
             "frame": card,
             "name": name_entry,
             "guild": guild_entry,
             "channels": channels_entry,
             "categories": categories_entry,
+            # Biome titles this server should NOT hunt. Empty = hunt every
+            # globally-enabled biome (the default / backward-compatible state).
+            "biome_excluded": set(),
+            "biome_flap": biome_flap,
+            "biome_flap_layout": biome_flap_layout,
+            "biome_expand_btn": biome_expand_btn,
+            "biome_expanded": False,
+            "biome_checks": {},
         }
+        biome_expand_btn.clicked.connect(lambda _=False, e=entry: self._toggle_server_biome_flap(e))
         remove_btn.clicked.connect(lambda: self.remove_guild_entry(entry))
         self.guild_layout.addWidget(card)
         self.guild_entries.append(entry)
+
+    def _toggle_server_biome_flap(self, entry):
+        expanded = entry["biome_expanded"]
+        if not expanded:
+            self._rebuild_server_biome_checks(entry)
+        entry["biome_flap"].setVisible(not expanded)
+        entry["biome_expand_btn"].setText("⌄" if expanded else "⌃")
+        entry["biome_expanded"] = not expanded
+
+    def _rebuild_server_biome_checks(self, entry):
+        layout = entry["biome_flap_layout"]
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        entry["biome_checks"] = {}
+
+        enabled = self.get_enabled_biomes()
+        if not enabled:
+            layout.addWidget(self._faint("No biomes selected in the Biomes tab yet."), 0, 0, 1, 2)
+            return
+        for i, biome in enumerate(enabled):
+            cb = QtWidgets.QCheckBox(biome)
+            cb.setChecked(biome not in entry["biome_excluded"])
+            cb.toggled.connect(lambda checked, b=biome, e=entry: self._on_server_biome_toggled(e, b, checked))
+            layout.addWidget(cb, i // 2, i % 2)
+            entry["biome_checks"][biome] = cb
+
+    def _on_server_biome_toggled(self, entry, biome, checked):
+        if checked:
+            entry["biome_excluded"].discard(biome)
+        else:
+            entry["biome_excluded"].add(biome)
 
     def remove_guild_entry(self, entry=None):
         if len(self.guild_entries) <= 1:
@@ -1956,6 +2024,7 @@ class FishSniperUI(QtWidgets.QMainWindow):
                     "guild_id": guild_id,
                     "channel_ids": channel_ids,
                     "category_ids": category_ids,
+                    "excluded_biomes": sorted(entry.get("biome_excluded", set())),
                 })
         return guild_mappings
 
@@ -2112,6 +2181,7 @@ class FishSniperUI(QtWidgets.QMainWindow):
                     entry["guild"].setText(str(mapping.get('guild_id', '')))
                     entry["channels"].setText(', '.join(map(str, mapping.get('channel_ids', []))))
                     entry["categories"].setText(', '.join(map(str, mapping.get('category_ids', []))))
+                    entry["biome_excluded"] = set(mapping.get('excluded_biomes', []))
 
             biome_priority_levels = settings.get('biome_priority_levels')
             num_tiers = settings.get('num_tiers', 3)
