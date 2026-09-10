@@ -1,7 +1,7 @@
 import json
 import requests
 import discord
-from discord_scanner import biome_thumbnail_url, biome_should_ping
+from discord_scanner import biome_thumbnail_url, biome_should_ping, biome_embed_color
 
 
 def _format_duration(seconds):
@@ -81,7 +81,7 @@ class Webhook:
 
         embed = {
             "title": f"Joining: {biome}",
-            "color": discord.Color.blue().value,
+            "color": biome_embed_color(biome) or discord.Color.blue().value,
             "thumbnail": {"url": biome_thumbnail_url(biome)},
         }
         if fields:
@@ -146,7 +146,7 @@ class Webhook:
         embed = {
             "title": f"Biome Ended: {biome}",
             "description": "Resuming background scan.",
-            "color": discord.Color.orange().value,
+            "color": biome_embed_color(biome) or discord.Color.orange().value,
         }
         if duration_seconds is not None:
             embed["fields"] = [{
@@ -159,6 +159,6 @@ class Webhook:
     def send_priority_interrupt(self, old_biome, new_biome):
         self._send({
             "title": f"Priority Interrupt: {new_biome}",
-            "color": discord.Color.gold().value,
+            "color": biome_embed_color(new_biome) or discord.Color.gold().value,
             "fields": [{"name": "Abandoning", "value": old_biome, "inline": False}],
         })
