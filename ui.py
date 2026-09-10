@@ -82,13 +82,13 @@ def tier_color(tier_index):
 
 
 BIOMES = ["Rainy", "Snowy", "Windy", "Hell", "Heaven", "Corruption", "Starfall", "Sand Storm", "Null",
-          "Glitched", "Dreamspace", "Cyberspace", "Singularity", "Blazing Sun"]
+          "Glitched", "Dreamspace", "Cyberspace", "Singularity", "Blazing Sun", "Incinerator"]
 
 BIOME_ICONS = {
     "Rainy": "🌧️", "Snowy": "❄️", "Windy": "💨", "Hell": "🔥", "Heaven": "☁️",
     "Corruption": "☠️", "Starfall": "🌠", "Sand Storm": "🏜️", "Null": "⬛",
     "Glitched": "🧩", "Dreamspace": "💤", "Cyberspace": "🖥️", "Singularity": "🌀",
-    "Blazing Sun": "☀️",
+    "Blazing Sun": "☀️", "Incinerator": "🌋",
 }
 
 DEFAULT_CHECKIN_SCREENSHOT_CONFIG = {
