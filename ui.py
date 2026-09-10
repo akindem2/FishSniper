@@ -883,7 +883,7 @@ class FishSniperUI(QtWidgets.QMainWindow):
         grid.setVerticalSpacing(8)
 
         grid.addWidget(self._muted("Screen Resolution"), 0, 0)
-        self.res_dropdown = self._combo(["1080p", "1440p", "1366x768"])
+        self.res_dropdown = self._combo(["1080p", "1920x1200", "1440p", "1366x768"])
         self.res_dropdown.currentTextChanged.connect(lambda _v: self.save_settings())
         grid.addWidget(self.res_dropdown, 1, 0)
 

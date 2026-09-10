@@ -131,6 +131,75 @@ COORDS = {
         },
 
     },
+    # Derived from the 1080p (1920x1080) profile above. The width is identical
+    # (1920), so every x is unchanged; the viewport is 120px taller, so each y
+    # (and each region height) is scaled by 1200/1080 and rounded to the
+    # nearest pixel. AUTO_ITEM / GAUNTLET stay (0, 0) since they're unset at
+    # 1080p too.
+    "1920x1200": {
+        "FISHING": {
+            "CAST_ROD": (862, 937),
+            "BITE_INDICATOR": (1176, 929),
+            "BAR_COLOR": (955, 852),
+            "CLAIM_FISH": (1113, 380),
+            "ALT_CLAIM_FISH": (1167, 531),
+            "MINIGAME_REGION": (757, 847, 404, 22)
+        },
+        "MERCHANT": {
+            "CAMERA_SETUP_1": (47, 519),
+            "CAMERA_SETUP_2": (382, 156),
+            "OPEN_MERCHANT_1": (956, 892),
+            "OPEN_MERCHANT_2": (956, 1042),
+            "SELECT_FISH": (828, 449),
+            "SELL_ALL_ON": (680, 893),
+            "SELL_ALL_OFF": (512, 893),
+            "CONFIRM_SELL": (801, 696),
+            "CLOSE_MERCHANT": (1458, 296)
+        },
+        "START": {
+                "START_BUTTON_POS": (251, 1111),
+        },
+        "BUY": {
+            "OPEN_BUY_TAB": (938, 346),
+            "PURCHASE_BUTTON_1": (600, 888),
+            "AMOUNT_BOX": (1117, 562),
+            "PURCHASE_BUTTON_2": (1125, 683),
+            "CLOSE_ITEM_POPUP": (1257, 438),
+            "ITEMS": {
+                "Lucky Potion": (848, 500),
+                "Speed Potion": (1027, 500),
+                "Wind Essence": (1207, 500),
+                "Icicle": (1387, 500),
+
+                "Rainy Bottle": (848, 750),
+                "Haste Potion III": (1027, 750),
+                "Fortune Potion III": (1207, 750),
+                "Gladiator Potion": (1387, 750),
+
+                "Eternal Flame": (848, 904),
+                "Corruptaine": (1027, 904),
+                "Hour Glass": (1207, 904),
+                "NULL?": (1387, 904),
+
+                "Potion of Bound": (848, 667),
+                "Warp Potion": (1027, 667),
+                "Heavenly Potion": (1207, 667)
+            },
+        },
+        "AUTO_ITEM": {
+            "INVENTORY_BUTTON": (0, 0),
+            "ITEMS_TAB": (0, 0),
+            "SEARCH_BAR": (0, 0),
+            "FIRST_RESULT": (0, 0),
+            "AMOUNT_BOX": (0, 0),
+            "USE_BUTTON": (0, 0),
+            "CLOSE_INVENTORY": (0, 0),
+        },
+        "GAUNTLET": {
+            "GAUNTLET_TAB": (0, 0),
+        },
+
+    },
     "1440p": {
         "FISHING": {
             "CAST_ROD": (1161, 1124),
