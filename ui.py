@@ -24,8 +24,6 @@ except Exception as e:
     keyboard = None
     print(f"[UI] 'keyboard' module unavailable — global hotkeys will be disabled: {e}")
 
-ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico")
-
 DEFAULT_START_HOTKEY = "f1"
 DEFAULT_STOP_HOTKEY = "f2"
 
@@ -659,7 +657,6 @@ class FishSniperUI(QtWidgets.QMainWindow):
         self._registered_hotkey_handles = []
 
         self.setWindowTitle("FishSniper")
-        self.setWindowIcon(QtGui.QIcon(ICON_PATH))
         self.resize(1120, 820)
         self.setMinimumSize(940, 640)
 
@@ -791,8 +788,8 @@ class FishSniperUI(QtWidgets.QMainWindow):
         v.setSpacing(8)
 
         brand = QtWidgets.QHBoxLayout()
-        logo = QtWidgets.QLabel()
-        logo.setPixmap(QtGui.QIcon(ICON_PATH).pixmap(28, 28))
+        logo = QtWidgets.QLabel("🎣")
+        logo.setStyleSheet("font-size: 26px;")
         text_col = QtWidgets.QVBoxLayout()
         text_col.setSpacing(0)
         name = QtWidgets.QLabel("FishSniper")
