@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import pyautogui
 import pydirectinput
+from humancursor import SystemCursor
 from PIL import Image, ImageGrab
 import win32gui
 import win32con
@@ -58,7 +59,7 @@ COORDS = {
             "BITE_INDICATOR": (1176, 836),
             "BAR_COLOR": (955, 767),
             "CLAIM_FISH": (1113, 342),
-            "ALT_CLAIM_FISH": (1167, 478),  # Replace with actual coordinates
+            "ALT_CLAIM_FISH": (1167, 478),
             "MINIGAME_REGION": (757, 762, 404, 20) 
         },
         "MERCHANT": {
@@ -107,7 +108,27 @@ COORDS = {
                 "Warp Potion": (1027, 600),
                 "Heavenly Potion": (1207, 600)
         },
-}
+        },
+        # Fill these in: the auto-item "use on join" flow. All positions
+        # here are shared across every configured item — same inventory UI
+        # regardless of which item's being used.
+        "AUTO_ITEM": {
+            "INVENTORY_BUTTON": (0, 0),
+            "ITEMS_TAB": (0, 0),
+            "SEARCH_BAR": (0, 0),
+            "FIRST_RESULT": (0, 0),
+            "AMOUNT_BOX": (0, 0),
+            "USE_BUTTON": (0, 0),
+            "CLOSE_INVENTORY": (0, 0),
+        },
+        # Fill this in: the "Gauntlet" tab inside the inventory (opened via
+        # AUTO_ITEM's INVENTORY_BUTTON above, and closed via its
+        # CLOSE_INVENTORY). Per-device item/button positions are set from
+        # the app's Gauntlet tab instead of here, since there can be many
+        # devices and they're added/edited at runtime.
+        "GAUNTLET": {
+            "GAUNTLET_TAB": (0, 0),
+        },
 
     },
     "1440p": {
@@ -116,7 +137,7 @@ COORDS = {
             "BITE_INDICATOR": (1536, 1119),
             "BAR_COLOR": (1261, 1033),
             "CLAIM_FISH": (1457, 491),
-            "ALT_CLAIM_FISH": (1556, 637),  # Replace with actual coordinates
+            "ALT_CLAIM_FISH": (1556, 637),
             "MINIGAME_REGION": (1043, 1033, 476, 25)
         },
         "MERCHANT": {
@@ -157,6 +178,18 @@ COORDS = {
                 "Heavenly Potion": (1610, 800),
             },
         },
+        "AUTO_ITEM": {
+            "INVENTORY_BUTTON": (0, 0),
+            "ITEMS_TAB": (0, 0),
+            "SEARCH_BAR": (0, 0),
+            "FIRST_RESULT": (0, 0),
+            "AMOUNT_BOX": (0, 0),
+            "USE_BUTTON": (0, 0),
+            "CLOSE_INVENTORY": (0, 0),
+        },
+        "GAUNTLET": {
+            "GAUNTLET_TAB": (0, 0),
+        },
     },
     "1366x768": {
         "FISHING": {
@@ -164,7 +197,7 @@ COORDS = {
             "BITE_INDICATOR": (866, 593),
             "BAR_COLOR": (674, 533),
             "CLAIM_FISH": (829, 218),
-            "ALT_CLAIM_FISH": (830, 340),  # Replace with actual coordinates
+            "ALT_CLAIM_FISH": (830, 340),
             "MINIGAME_REGION": (513, 531, 343, 18)
         },
         "MERCHANT": {
@@ -208,6 +241,18 @@ COORDS = {
                 "Warp Potion": (732, 427),
                 "Heavenly Potion": (860, 427)
             },
+        },
+        "AUTO_ITEM": {
+            "INVENTORY_BUTTON": (0, 0),
+            "ITEMS_TAB": (0, 0),
+            "SEARCH_BAR": (0, 0),
+            "FIRST_RESULT": (0, 0),
+            "AMOUNT_BOX": (0, 0),
+            "USE_BUTTON": (0, 0),
+            "CLOSE_INVENTORY": (0, 0),
+        },
+        "GAUNTLET": {
+            "GAUNTLET_TAB": (0, 0),
         },
     }
 }
@@ -523,7 +568,33 @@ class FishSolBot:
         self.last_purchased = {}  # {item_name: datetime (aware, US/Eastern) of last successful purchase}
         self.buy_callback = None  # callback(item_name, quantity) fired after each successful purchase
         self.session_end_callback = None  # callback() fired at the top of every toggle_off()
-        
+        self.pending_auto_items = []  # items (with quantities) to use for the server currently being joined
+
+        # Gauntlet (rolling-device) state. See set_gauntlet_settings(),
+        # request_gauntlet_for_biome(), and _perform_gauntlet_swap() for
+        # how these fit together.
+        self.gauntlets = {}  # {name: {"item_pos":, "gauntlet_button_pos":, "needs_scroll":, "scroll_ticks":}}
+        self.default_gauntlet_name = None
+        self.biome_gauntlet_map = {}  # {biome_title: gauntlet_name or None (= use default)}
+        self.currently_equipped_gauntlet = None
+        self._pending_gauntlet_target = None
+        self.gauntlet_swap_in_progress = False
+        self.gauntlet_swap_finished_callback = None
+        # Set ONLY by the user pressing Stop (button or hotkey) — see
+        # request_user_stop(). This is the one signal a gauntlet swap is
+        # allowed to check; every other automation-driven stop (disconnect,
+        # priority interrupt, ordinary session end) is deliberately ignored
+        # once a swap has started, so it always runs to completion.
+        self.user_stop_requested = False
+
+        # Human-like mouse movement. See _human_move()/_human_click(). The
+        # curved paths can pass close to a screen edge, which would otherwise
+        # trip PyAutoGUI's corner fail-safe and raise mid-move, so disable it
+        # (this is a full-screen automation tool that intentionally drives the
+        # cursor everywhere).
+        self.cursor = SystemCursor()
+        pyautogui.FAILSAFE = False
+
         # Initialize default variables (Replaces all the global variables)
         self.update_coordinates("1080p", "Normal")
 
@@ -563,6 +634,34 @@ class FishSolBot:
             if remaining <= 0:
                 return
             time.sleep(min(chunk, remaining))
+
+    def _human_move(self, x, y, duration=0.3):
+        """Glide the cursor to (x, y) along a randomized human-like Bezier
+        path (python-humancursor). Roblox only registers a hover once the
+        cursor actually moves *within* a button's bounds, so a straight
+        teleport onto a button often gets ignored. The curve's many
+        sub-points land inside the target, which makes the hover register --
+        this replaces the old "approach from just outside + nudge" three-move
+        sequences. Movement goes through PyAutoGUI (which humancursor drives);
+        the click itself stays on pydirectinput, which already fires reliably
+        in-game. humancursor mutates the global PyAutoGUI step-pause, so it is
+        saved and restored here to avoid leaking into other PyAutoGUI calls
+        (e.g. scrolls)."""
+        prev_pause = pyautogui.PAUSE
+        try:
+            self.cursor.move_to((int(x), int(y)), duration=duration)
+        finally:
+            pyautogui.PAUSE = prev_pause
+
+    def _human_click(self, x, y, settle=0.1, hold=0.05, duration=0.3):
+        """Human-glide onto (x, y), briefly settle, then press with
+        pydirectinput. Mirrors the old `moveTo... ; sleep(settle);
+        mouseDown(); sleep(hold); mouseUp()` pattern used throughout."""
+        self._human_move(x, y, duration=duration)
+        time.sleep(settle)
+        pydirectinput.mouseDown()
+        time.sleep(hold)
+        pydirectinput.mouseUp()
 
     def focus_roblox(self):
         roblox_hwnd = None
@@ -646,6 +745,18 @@ class FishSolBot:
             self.BUY_PURCHASE_BUTTON_2 = buy_coords.get("PURCHASE_BUTTON_2", (0, 0))
             self.BUY_CLOSE_ITEM_POPUP = buy_coords.get("CLOSE_ITEM_POPUP", (0, 0))
             self.BUY_ITEM_POSITIONS = buy_coords.get("ITEMS", {})
+
+            auto_item_coords = COORDS[resolution].get("AUTO_ITEM", {})
+            self.AUTO_ITEM_INVENTORY_BUTTON = auto_item_coords.get("INVENTORY_BUTTON", (0, 0))
+            self.AUTO_ITEM_ITEMS_TAB = auto_item_coords.get("ITEMS_TAB", (0, 0))
+            self.AUTO_ITEM_SEARCH_BAR = auto_item_coords.get("SEARCH_BAR", (0, 0))
+            self.AUTO_ITEM_FIRST_RESULT = auto_item_coords.get("FIRST_RESULT", (0, 0))
+            self.AUTO_ITEM_AMOUNT_BOX = auto_item_coords.get("AMOUNT_BOX", (0, 0))
+            self.AUTO_ITEM_USE_BUTTON = auto_item_coords.get("USE_BUTTON", (0, 0))
+            self.AUTO_ITEM_CLOSE_INVENTORY = auto_item_coords.get("CLOSE_INVENTORY", (0, 0))
+
+            gauntlet_coords = COORDS[resolution].get("GAUNTLET", {})
+            self.GAUNTLET_TAB = gauntlet_coords.get("GAUNTLET_TAB", (0, 0))
 
             print(f"[System] Coordinates updated to {resolution}")
 
@@ -852,17 +963,9 @@ class FishSolBot:
 
     def setup_camera(self):
         print("[Pathing] Setting up camera orientation...")
-        pydirectinput.moveTo(self.CAMERA_SETUP_1[0], self.CAMERA_SETUP_1[1])
-        time.sleep(0.1)
-        pydirectinput.moveTo(self.CAMERA_SETUP_1[0], self.CAMERA_SETUP_1[1] - 3, duration=0.2)
+        self._human_click(self.CAMERA_SETUP_1[0], self.CAMERA_SETUP_1[1] - 3, settle=0.22, hold=0)
         time.sleep(0.22)
-        pydirectinput.click()
-        time.sleep(0.22)
-        pydirectinput.moveTo(self.CAMERA_SETUP_2[0], self.CAMERA_SETUP_2[1])
-        time.sleep(0.1)
-        pydirectinput.moveTo(self.CAMERA_SETUP_2[0], self.CAMERA_SETUP_2[1] - 3, duration=0.2)
-        time.sleep(0.22)
-        pydirectinput.click()
+        self._human_click(self.CAMERA_SETUP_2[0], self.CAMERA_SETUP_2[1] - 3, settle=0.22, hold=0)
         time.sleep(0.22)
         
         # Zoom all the way in
@@ -951,20 +1054,13 @@ class FishSolBot:
         time.sleep(0.3)
         pydirectinput.keyUp('e')
         time.sleep(0.3)
-        pydirectinput.moveTo(self.OPEN_MERCHANT_1[0], self.OPEN_MERCHANT_1[1] - 50)
-        pydirectinput.moveTo(self.OPEN_MERCHANT_1[0], self.OPEN_MERCHANT_1[1], duration=0.2)
-        time.sleep(0.1)
-        pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
+        self._human_click(self.OPEN_MERCHANT_1[0], self.OPEN_MERCHANT_1[1])
         time.sleep(0.2)
 
         while True:
             if not self._cycle_active(): return
             
-            pydirectinput.moveTo(self.OPEN_MERCHANT_2[0], self.OPEN_MERCHANT_2[1] - 3)
-            pydirectinput.moveTo(self.OPEN_MERCHANT_2[0], self.OPEN_MERCHANT_2[1], duration=0.2)
-            time.sleep(0.1)
-
-            pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
+            self._human_click(self.OPEN_MERCHANT_2[0], self.OPEN_MERCHANT_2[1])
             time.sleep(0.2)
             
             try:
@@ -983,25 +1079,13 @@ class FishSolBot:
         for _ in range(self.sell_loops):  
             if not self._cycle_active(): return
             
-            pydirectinput.moveTo(self.SELECT_FISH[0], self.SELECT_FISH[1] - 50)
-            pydirectinput.moveTo(self.SELECT_FISH[0], self.SELECT_FISH[1], duration=0.2)
-            pydirectinput.moveTo(self.SELECT_FISH[0] - 3, self.SELECT_FISH[1], duration=0.1)
-            time.sleep(0.1)
-            pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
+            self._human_click(self.SELECT_FISH[0], self.SELECT_FISH[1])
             time.sleep(0.2)
-            
-            pydirectinput.moveTo(self.SELL_ALL_ON[0], self.SELL_ALL_ON[1] - 50)
-            pydirectinput.moveTo(self.SELL_ALL_ON[0], self.SELL_ALL_ON[1], duration=0.2)
-            pydirectinput.moveTo(self.SELL_ALL_ON[0] - 3, self.SELL_ALL_ON[1], duration=0.2)
-            time.sleep(0.1)
-            pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
+
+            self._human_click(self.SELL_ALL_ON[0], self.SELL_ALL_ON[1])
             time.sleep(0.3)
-            
-            pydirectinput.moveTo(self.CONFIRM_SELL[0], self.CONFIRM_SELL[1] - 50)
-            pydirectinput.moveTo(self.CONFIRM_SELL[0], self.CONFIRM_SELL[1], duration=0.2)
-            pydirectinput.moveTo(self.CONFIRM_SELL[0] - 3, self.CONFIRM_SELL[1], duration=0.2)
-            time.sleep(0.1)
-            pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
+
+            self._human_click(self.CONFIRM_SELL[0], self.CONFIRM_SELL[1])
             self._interruptible_sleep(1.0)
 
     # ------------------------------------------------------------------
@@ -1095,10 +1179,7 @@ class FishSolBot:
         print(f"[Auto-Buy] {len(items_needed)} item(s) due for purchase: "
               f"{', '.join(item['name'] for item, _ in items_needed)}")
 
-        pydirectinput.moveTo(self.BUY_OPEN_TAB[0], self.BUY_OPEN_TAB[1] - 3)
-        pydirectinput.moveTo(self.BUY_OPEN_TAB[0], self.BUY_OPEN_TAB[1], duration=0.2)
-        time.sleep(0.1)
-        pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
+        self._human_click(self.BUY_OPEN_TAB[0], self.BUY_OPEN_TAB[1])
         self._interruptible_sleep(0.4)
         if not self._cycle_active(): return
 
@@ -1113,8 +1194,7 @@ class FishSolBot:
             if not self._cycle_active(): return
             print("[Auto-Buy] Scrolling down to reach the remaining items...")
             #Move to the scroll area and scroll down
-            pyautogui.moveTo(self.ALT_CLAIM_FISH_POS[0], self.ALT_CLAIM_FISH_POS[1]-3)
-            pyautogui.moveTo(self.ALT_CLAIM_FISH_POS[0], self.ALT_CLAIM_FISH_POS[1], duration=0.2)
+            self._human_move(self.BUY_CLOSE_ITEM_POPUP[0], self.BUY_CLOSE_ITEM_POPUP[1])
             for _ in range(BUY_SCROLL_STEPS):
                 if not self._cycle_active(): return
                 pyautogui.scroll(BUY_SCROLL_AMOUNT)
@@ -1137,26 +1217,17 @@ class FishSolBot:
         print(f"[Auto-Buy] Buying {qty}x {name}...")
 
         # Click the item in the Buy list.
-        pydirectinput.moveTo(pos[0], pos[1] - 3)
-        pydirectinput.moveTo(pos[0], pos[1], duration=0.2)
-        time.sleep(0.1)
-        pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
+        self._human_click(pos[0], pos[1])
         self._interruptible_sleep(0.3)
         if not self._cycle_active(): return
 
         # First Purchase button — opens the amount/confirm popup.
-        pydirectinput.moveTo(self.BUY_PURCHASE_BUTTON_1[0], self.BUY_PURCHASE_BUTTON_1[1] - 3)
-        pydirectinput.moveTo(self.BUY_PURCHASE_BUTTON_1[0], self.BUY_PURCHASE_BUTTON_1[1], duration=0.2)
-        time.sleep(0.1)
-        pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
+        self._human_click(self.BUY_PURCHASE_BUTTON_1[0], self.BUY_PURCHASE_BUTTON_1[1])
         self._interruptible_sleep(0.3)
         if not self._cycle_active(): return
 
         # Amount box — clicking it auto-selects/overwrites the pre-filled value.
-        pydirectinput.moveTo(self.BUY_AMOUNT_BOX[0], self.BUY_AMOUNT_BOX[1] - 3)
-        pydirectinput.moveTo(self.BUY_AMOUNT_BOX[0], self.BUY_AMOUNT_BOX[1], duration=0.2)
-        time.sleep(0.1)
-        pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
+        self._human_click(self.BUY_AMOUNT_BOX[0], self.BUY_AMOUNT_BOX[1])
         self._interruptible_sleep(0.2)
         if not self._cycle_active(): return
         pydirectinput.typewrite(str(qty), interval=0.03)
@@ -1164,24 +1235,233 @@ class FishSolBot:
         if not self._cycle_active(): return
 
         # Second/confirm Purchase button.
-        pydirectinput.moveTo(self.BUY_PURCHASE_BUTTON_2[0], self.BUY_PURCHASE_BUTTON_2[1] - 3)
-        pydirectinput.moveTo(self.BUY_PURCHASE_BUTTON_2[0], self.BUY_PURCHASE_BUTTON_2[1], duration=0.2)
-        time.sleep(0.1)
-        pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
+        self._human_click(self.BUY_PURCHASE_BUTTON_2[0], self.BUY_PURCHASE_BUTTON_2[1])
         self._interruptible_sleep(0.5)
         if not self._cycle_active(): return
 
         # Close the item's buy popup (separate from the merchant's own X).
-        pydirectinput.moveTo(self.BUY_CLOSE_ITEM_POPUP[0], self.BUY_CLOSE_ITEM_POPUP[1] - 3)
-        pydirectinput.moveTo(self.BUY_CLOSE_ITEM_POPUP[0], self.BUY_CLOSE_ITEM_POPUP[1], duration=0.2)
-        time.sleep(0.1)
-        pydirectinput.mouseDown(); time.sleep(0.05); pydirectinput.mouseUp()
+        self._human_click(self.BUY_CLOSE_ITEM_POPUP[0], self.BUY_CLOSE_ITEM_POPUP[1])
         self._interruptible_sleep(0.3)
 
         self.last_purchased[name] = datetime.now(RESTOCK_TZ)
         print(f"[Auto-Buy] Bought {qty}x {name}.")
         if self.buy_callback:
             self.buy_callback(name, qty)
+
+    # ------------------------------------------------------------------
+    # Auto-Item — uses configured items right after joining a server whose
+    # expected biome (from the Discord announcement) matches one of that
+    # item's configured biomes. Runs after the join screenshot but before
+    # any pathing begins.
+    # ------------------------------------------------------------------
+
+    def set_pending_auto_items(self, items):
+        """Sets the auto-items to use for the server currently being
+        joined — resolved by the Discord scanner against the biome this
+        join is expected to land in, and pushed here right before
+        toggle_on(). Consumed and cleared by use_pending_auto_items()
+        right after the join screenshot is captured."""
+        self.pending_auto_items = list(items or [])
+
+    def use_pending_auto_items(self):
+        """Runs right after the join screenshot, before any pathing
+        begins. Uses whatever items were resolved for this join's expected
+        biome, in order, then closes the inventory. Does nothing at all
+        (no clicks) if nothing is pending, or if the shared auto-item
+        coordinates haven't been configured yet."""
+        items = self.pending_auto_items
+        self.pending_auto_items = []
+        if not items:
+            return
+
+        required_positions = (
+            self.AUTO_ITEM_INVENTORY_BUTTON, self.AUTO_ITEM_ITEMS_TAB, self.AUTO_ITEM_SEARCH_BAR,
+            self.AUTO_ITEM_FIRST_RESULT, self.AUTO_ITEM_AMOUNT_BOX, self.AUTO_ITEM_USE_BUTTON,
+            self.AUTO_ITEM_CLOSE_INVENTORY,
+        )
+        if any(pos == (0, 0) for pos in required_positions):
+            print("[Auto-Item] Auto-item coordinates aren't configured yet — skipping.")
+            return
+
+        print(f"[Auto-Item] Using {len(items)} item(s) for this biome: "
+              f"{', '.join(item['name'] for item in items)}")
+
+        # Open inventory.
+        self._human_click(self.AUTO_ITEM_INVENTORY_BUTTON[0], self.AUTO_ITEM_INVENTORY_BUTTON[1])
+        self._interruptible_sleep(0.4)
+        if not self._cycle_active(): return
+
+        # Items tab.
+        self._human_click(self.AUTO_ITEM_ITEMS_TAB[0], self.AUTO_ITEM_ITEMS_TAB[1])
+        self._interruptible_sleep(0.3)
+        if not self._cycle_active(): return
+
+        for item in items:
+            if not self._cycle_active(): return
+            self._use_single_auto_item(item)
+
+        # Close inventory.
+        self._human_click(self.AUTO_ITEM_CLOSE_INVENTORY[0], self.AUTO_ITEM_CLOSE_INVENTORY[1])
+        self._interruptible_sleep(0.3)
+
+        print("[Auto-Item] Finished using items for this biome.")
+
+    def _use_single_auto_item(self, item):
+        name = item["name"]
+        qty = item["quantity"]
+        print(f"[Auto-Item] Using {qty}x {name}...")
+
+        # Search bar.
+        self._human_click(self.AUTO_ITEM_SEARCH_BAR[0], self.AUTO_ITEM_SEARCH_BAR[1])
+        self._interruptible_sleep(0.2)
+        if not self._cycle_active(): return
+        pydirectinput.typewrite(name, interval=0.03)
+        self._interruptible_sleep(0.3)
+        if not self._cycle_active(): return
+
+        # First search result.
+        self._human_click(self.AUTO_ITEM_FIRST_RESULT[0], self.AUTO_ITEM_FIRST_RESULT[1])
+        self._interruptible_sleep(0.3)
+        if not self._cycle_active(): return
+
+        # Amount box — clicking it auto-selects/overwrites the pre-filled value.
+        self._human_click(self.AUTO_ITEM_AMOUNT_BOX[0], self.AUTO_ITEM_AMOUNT_BOX[1])
+        self._interruptible_sleep(0.2)
+        if not self._cycle_active(): return
+        pydirectinput.typewrite(str(qty), interval=0.03)
+        self._interruptible_sleep(0.2)
+        if not self._cycle_active(): return
+
+        # Use button.
+        self._human_click(self.AUTO_ITEM_USE_BUTTON[0], self.AUTO_ITEM_USE_BUTTON[1])
+        self._interruptible_sleep(0.5)
+
+        print(f"[Auto-Item] Used {qty}x {name}.")
+
+    # ------------------------------------------------------------------
+    # Gauntlet (rolling-device) swapping.
+    #
+    # Unlike everything else in this file, _perform_gauntlet_swap() does
+    # NOT check _cycle_active() between its steps. That's deliberate: once
+    # a swap starts, it must run to completion no matter what — a
+    # disconnect, a priority interrupt, or the biome changing again mid-way
+    # should never cut it short, only the user pressing Stop should be
+    # able to. See request_user_stop() and gauntlet_swap_in_progress.
+    # ------------------------------------------------------------------
+
+    GAUNTLET_SWAP_CONFIRM_WAIT = 3.0
+
+    def set_gauntlet_settings(self, gauntlets, default_gauntlet_name, biome_gauntlet_map):
+        """gauntlets: {name: {"item_pos": (x,y), "gauntlet_button_pos":
+        (x,y), "needs_scroll": bool, "scroll_ticks": int}}.
+        default_gauntlet_name: name to fall back to for any biome without
+        its own mapping. biome_gauntlet_map: {biome_title: gauntlet_name or
+        None}."""
+        self.gauntlets = dict(gauntlets or {})
+        self.default_gauntlet_name = default_gauntlet_name
+        self.biome_gauntlet_map = dict(biome_gauntlet_map or {})
+
+    def set_gauntlet_swap_finished_callback(self, callback):
+        """callback() — fired once a gauntlet swap finishes, whether it
+        completed normally or was cut short by a user stop. The Discord
+        scanner uses this to apply anything it deferred while the swap's
+        lock (gauntlet_swap_in_progress) was held."""
+        self.gauntlet_swap_finished_callback = callback
+
+    def request_user_stop(self):
+        """Called only when the user presses Stop — the button or the
+        hotkey, nothing else. This is the one signal a gauntlet swap in
+        progress will actually respond to."""
+        self.user_stop_requested = True
+
+    def request_gauntlet_for_biome(self, biome_title):
+        """Called by the Discord scanner whenever a biome is confirmed —
+        a fresh join, or a biome-to-biome transition within the same
+        server. Only ever records which gauntlet SHOULD be equipped; the
+        actual swap happens later, at a safe point between fishing
+        actions (see play_fishing_cycle), never immediately from here."""
+        target = self.biome_gauntlet_map.get(biome_title) or self.default_gauntlet_name
+        if not target or target not in self.gauntlets:
+            return
+        if target == self.currently_equipped_gauntlet:
+            return
+        self._pending_gauntlet_target = target
+
+    def _perform_gauntlet_swap(self):
+        """Opens the inventory, the Gauntlet tab, (optionally) scrolls,
+        selects the device, presses the gauntlet button, waits, presses it
+        again to confirm, then closes the inventory. Atomic: once started,
+        every step runs regardless of what else happens, except a user
+        stop (checked frequently, so Stop still feels responsive)."""
+        target_name = self._pending_gauntlet_target
+        self._pending_gauntlet_target = None
+        if not target_name or target_name not in self.gauntlets:
+            return
+        if target_name == self.currently_equipped_gauntlet:
+            return
+
+        gauntlet = self.gauntlets[target_name]
+        item_pos = gauntlet.get("item_pos", (0, 0))
+        button_pos = gauntlet.get("gauntlet_button_pos", (0, 0))
+        if (item_pos == (0, 0) or button_pos == (0, 0) or self.GAUNTLET_TAB == (0, 0)
+                or self.AUTO_ITEM_INVENTORY_BUTTON == (0, 0) or self.AUTO_ITEM_CLOSE_INVENTORY == (0, 0)):
+            print(f"[Gauntlet] Coordinates aren't fully configured yet — skipping swap to '{target_name}'.")
+            return
+
+        self.gauntlet_swap_in_progress = True
+        print(f"[Gauntlet] Swapping to '{target_name}'...")
+        try:
+            # Open inventory (reused from Auto Item).
+            self._human_click(self.AUTO_ITEM_INVENTORY_BUTTON[0], self.AUTO_ITEM_INVENTORY_BUTTON[1])
+            time.sleep(0.4)
+            if self.user_stop_requested: return
+
+            # Gauntlet tab.
+            self._human_click(self.GAUNTLET_TAB[0], self.GAUNTLET_TAB[1])
+            time.sleep(0.3)
+            if self.user_stop_requested: return
+
+            # Optional scroll — single wheel ticks, not big page jumps.
+            if gauntlet.get("needs_scroll"):
+                ticks = max(0, int(gauntlet.get("scroll_ticks", 0) or 0))
+                for _ in range(ticks):
+                    if self.user_stop_requested: return
+                    pyautogui.scroll(-1)
+                    time.sleep(0.05)
+                time.sleep(0.2)
+                if self.user_stop_requested: return
+
+            # Select the device.
+            self._human_click(item_pos[0], item_pos[1])
+            time.sleep(0.3)
+            if self.user_stop_requested: return
+
+            # Gauntlet (equip) button.
+            self._human_click(button_pos[0], button_pos[1])
+
+            # Fixed wait — deliberately not the usual interruptible sleep,
+            # since only a user stop should be able to cut this short.
+            waited = 0.0
+            while waited < self.GAUNTLET_SWAP_CONFIRM_WAIT:
+                if self.user_stop_requested: return
+                time.sleep(0.1)
+                waited += 0.1
+
+            # Press the gauntlet button again to confirm.
+            self._human_click(button_pos[0], button_pos[1])
+            time.sleep(0.3)
+            if self.user_stop_requested: return
+
+            # Close inventory (reused from Auto Item).
+            self._human_click(self.AUTO_ITEM_CLOSE_INVENTORY[0], self.AUTO_ITEM_CLOSE_INVENTORY[1])
+            time.sleep(0.3)
+
+            self.currently_equipped_gauntlet = target_name
+            print(f"[Gauntlet] Swapped to '{target_name}'.")
+        finally:
+            self.gauntlet_swap_in_progress = False
+            if self.gauntlet_swap_finished_callback:
+                self.gauntlet_swap_finished_callback()
 
     def walk_back_to_spot(self):
         profile = self.path_profiles[self.active_path_index]
@@ -1204,10 +1484,7 @@ class FishSolBot:
                     pydirectinput.press(action[1])
                 elif kind == "click":
                     x, y = getattr(self, action[1])
-                    pydirectinput.moveTo(x, y - 3)
-                    time.sleep(0.1)
-                    pydirectinput.moveTo(x, y, duration=0.2)
-                    pydirectinput.click()
+                    self._human_click(x, y, hold=0)
                 elif kind == "click_at":
                     pydirectinput.click(action[1], action[2])
                 elif kind == "scroll":
@@ -1220,13 +1497,7 @@ class FishSolBot:
     def do_pathing_routine(self, do_sell=True):
         print(f"=== PATHING ROUTINE STARTED (Selling: {do_sell}) ===")
 
-        pydirectinput.moveTo(self.START_BUTTON_POS[0], self.START_BUTTON_POS[1] - 20)
-        time.sleep(0.1)
-        pydirectinput.moveTo(*self.START_BUTTON_POS, duration=0.2)
-        time.sleep(0.1)
-        pydirectinput.mouseDown()
-        time.sleep(0.05)
-        pydirectinput.mouseUp()
+        self._human_click(*self.START_BUTTON_POS)
 
         self.reset_character()
         if not self._cycle_active(): return
@@ -1282,15 +1553,9 @@ class FishSolBot:
                         print("[Fishing Bot] Play/Start Button detected! Waiting 2 seconds before clicking...")
                         time.sleep(2.0)
                         
-                        pydirectinput.moveTo(self.START_BUTTON_POS[0], self.START_BUTTON_POS[1] - 20)
-                        time.sleep(0.1)
-                        pydirectinput.moveTo(*self.START_BUTTON_POS, duration=0.2)
-                        time.sleep(0.1)
-                        pydirectinput.mouseDown()
-                        time.sleep(0.05)
-                        pydirectinput.mouseUp()
-                        
-                        time.sleep(3.0) 
+                        self._human_click(*self.START_BUTTON_POS)
+
+                        time.sleep(3.0)
                         button_clicked = True
                         break 
                 except Exception:
@@ -1310,6 +1575,11 @@ class FishSolBot:
                 if self._cycle_active():
                     print("[Fishing Bot] Capturing join screenshot...")
                     self.capture_join_screenshot()
+
+            # Use any items configured for this join's expected biome —
+            # after the screenshot, but before any pathing begins.
+            if self._cycle_active():
+                self.use_pending_auto_items()
 
             self.is_waiting_for_start_button = False
             self.has_done_initial_pathing = False
@@ -1347,16 +1617,17 @@ class FishSolBot:
             self.do_pathing_routine(do_sell=True)
             return
 
+        # 0E. Gauntlet Swap — checked once per cast attempt, never mid-cast
+        # or mid-minigame, so it can't collide with an active bite-wait or
+        # the fishing minigame. A change lags the biome update by at most
+        # one fishing cycle, which is fine since gauntlets only affect
+        # rolling, not fishing itself.
+        if self._pending_gauntlet_target:
+            self._perform_gauntlet_swap()
+            return
+
         # 1. Cast the fishing rod
-        pydirectinput.moveTo(self.CAST_ROD_POS[0], self.CAST_ROD_POS[1] - 50)
-        time.sleep(0.1)
-        pydirectinput.moveTo(self.CAST_ROD_POS[0], self.CAST_ROD_POS[1], duration=0.2)
-        time.sleep(0.1)
-        pydirectinput.moveTo(self.CAST_ROD_POS[0]-3, self.CAST_ROD_POS[1], duration=0.1)
-        time.sleep(0.1)
-        pydirectinput.mouseDown()
-        time.sleep(0.05)
-        pydirectinput.mouseUp()
+        self._human_click(self.CAST_ROD_POS[0], self.CAST_ROD_POS[1])
         time.sleep(0.3)
 
         if not self._cycle_active():
@@ -1386,13 +1657,7 @@ class FishSolBot:
             time.sleep(1.5)
             pydirectinput.moveTo(10, 10)
             time.sleep(0.1)
-            pydirectinput.moveTo(self.CLAIM_FISH_POS[0], self.CLAIM_FISH_POS[1] - 50)
-            time.sleep(0.1)
-            pydirectinput.moveTo(*self.CLAIM_FISH_POS, duration=0.2)
-            time.sleep(0.3)
-            pydirectinput.mouseDown()
-            time.sleep(0.1)
-            pydirectinput.mouseUp()
+            self._human_click(*self.CLAIM_FISH_POS, settle=0.3, hold=0.1)
             time.sleep(0.5)
             print("Fishing timeout or no bite detected. Retrying recovery pathing...")
             should_sell = self.record_fishing_failsafe()
@@ -1435,25 +1700,9 @@ class FishSolBot:
         time.sleep(1.5)
         pydirectinput.moveTo(10, 10)
         time.sleep(0.1)
-        pydirectinput.moveTo(self.CLAIM_FISH_POS[0], self.CLAIM_FISH_POS[1] - 50)
-        time.sleep(0.1)
-        pydirectinput.moveTo(*self.CLAIM_FISH_POS, duration=0.2)
-        time.sleep(0.3)
-        pydirectinput.moveTo(self.CLAIM_FISH_POS[0]-3, self.CLAIM_FISH_POS[1], duration=0.1)
-        time.sleep(0.1)
-        pydirectinput.mouseDown()
-        time.sleep(0.1)
-        pydirectinput.mouseUp()
+        self._human_click(*self.CLAIM_FISH_POS, settle=0.3, hold=0.1)
 
-        pydirectinput.moveTo(self.ALT_CLAIM_FISH_POS[0], self.ALT_CLAIM_FISH_POS[1] - 50)
-        time.sleep(0.1)
-        pydirectinput.moveTo(*self.ALT_CLAIM_FISH_POS, duration=0.2)
-        time.sleep(0.1)
-        pydirectinput.moveTo(self.ALT_CLAIM_FISH_POS[0]-3, self.ALT_CLAIM_FISH_POS[1], duration=0.1)
-        time.sleep(0.1)
-        pydirectinput.mouseDown()
-        time.sleep(0.1)
-        pydirectinput.mouseUp()
+        self._human_click(*self.ALT_CLAIM_FISH_POS, hold=0.1)
 
 
         time.sleep(0.5)
@@ -1473,6 +1722,11 @@ class FishSolBot:
     def toggle_on(self, reset_initial_pathing=True):
         print("[System] Bot Started")
         self.is_running = True
+        # A fresh run (or a fresh join) means whatever stop was requested
+        # before has already been fully handled — clear it so it doesn't
+        # linger and block a future gauntlet swap that has nothing to do
+        # with it.
+        self.user_stop_requested = False
         if reset_initial_pathing:
             self.has_done_initial_pathing = False
 
@@ -1490,6 +1744,9 @@ class FishSolBot:
         # confirms a biome that says otherwise.
         self.fishing_enabled = True
         self._last_anti_afk_press = None
+        # A join that gets abandoned before it uses its items shouldn't
+        # leave them queued up for whatever session comes next.
+        self.pending_auto_items = []
         pydirectinput.keyUp('w')
         pydirectinput.keyUp('a')
         pydirectinput.keyUp('s')
