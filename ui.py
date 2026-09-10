@@ -4,6 +4,7 @@ import json
 import math
 import random
 import threading
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from html import escape
@@ -113,18 +114,28 @@ _biome_pixmap_cache = {}  # (biome, size) -> QPixmap (build only on the main/GUI
 
 
 def fetch_biome_bytes(biome_name):
-    """Downloads a biome's thumbnail bytes. Thread-safe (pure network I/O)."""
+    """Downloads a biome's thumbnail bytes. Thread-safe (pure network I/O).
+    Retries a few times with a generous timeout before giving up, since some
+    thumbnail hosts (e.g. postimg) can be slow to first-byte — a single short
+    timeout would otherwise cache a permanent failure for the session and fall
+    back to the emoji icon. Runs on a background thread, so waiting is fine."""
     if biome_name in _biome_bytes_cache:
         return _biome_bytes_cache[biome_name]
-    try:
-        resp = requests.get(biome_thumbnail_url(biome_name), timeout=4)
-        resp.raise_for_status()
-        _biome_bytes_cache[biome_name] = resp.content
-        return resp.content
-    except Exception as e:
-        print(f"[UI] Could not load thumbnail for {biome_name}: {e}")
-        _biome_bytes_cache[biome_name] = None
-        return None
+    url = biome_thumbnail_url(biome_name)
+    last_err = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, timeout=12)
+            resp.raise_for_status()
+            _biome_bytes_cache[biome_name] = resp.content
+            return resp.content
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(0.6 * (attempt + 1))
+    print(f"[UI] Could not load thumbnail for {biome_name} after 3 attempts: {last_err}")
+    _biome_bytes_cache[biome_name] = None
+    return None
 
 
 def get_biome_pixmap(biome_name, size=20):
