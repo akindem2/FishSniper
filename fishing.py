@@ -4,7 +4,8 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import pyautogui
 import pydirectinput
-from humancursor import SystemCursor
+from humancursor.utilities.human_curve_generator import HumanizeMouseTrajectory
+from humancursor.utilities.calculate_and_randomize import generate_random_curve_parameters
 from PIL import Image, ImageGrab
 import win32gui
 import win32con
@@ -658,11 +659,11 @@ class FishSolBot:
 
         # Human-like mouse movement. See _human_move()/_human_click(). The
         # curved paths can pass close to a screen edge, which would otherwise
-        # trip PyAutoGUI's corner fail-safe and raise mid-move, so disable it
-        # (this is a full-screen automation tool that intentionally drives the
-        # cursor everywhere).
-        self.cursor = SystemCursor()
+        # trip the corner fail-safe and raise mid-move, so disable it on both
+        # backends (this is a full-screen automation tool that intentionally
+        # drives the cursor everywhere).
         pyautogui.FAILSAFE = False
+        pydirectinput.FAILSAFE = False
 
         # Initialize default variables (Replaces all the global variables)
         self.update_coordinates("1080p", "Normal")
@@ -706,21 +707,54 @@ class FishSolBot:
 
     def _human_move(self, x, y, duration=0.3):
         """Glide the cursor to (x, y) along a randomized human-like Bezier
-        path (python-humancursor). Roblox only registers a hover once the
-        cursor actually moves *within* a button's bounds, so a straight
-        teleport onto a button often gets ignored. The curve's many
-        sub-points land inside the target, which makes the hover register --
-        this replaces the old "approach from just outside + nudge" three-move
-        sequences. Movement goes through PyAutoGUI (which humancursor drives);
-        the click itself stays on pydirectinput, which already fires reliably
-        in-game. humancursor mutates the global PyAutoGUI step-pause, so it is
-        saved and restored here to avoid leaking into other PyAutoGUI calls
-        (e.g. scrolls)."""
-        prev_pause = pyautogui.PAUSE
+        path, then feed each step to pydirectinput (SendInput).
+
+        Why not humancursor's own SystemCursor.move_to? It moves via PyAutoGUI
+        (SetCursorPos), which Roblox's UI does NOT register as a real mouse
+        move -- so button hovers never fire and clicks miss. pydirectinput
+        emits hardware-level moves that Roblox does see. We still borrow
+        humancursor's curve *generator* for the human-looking path; only the
+        movement backend changes.
+
+        Two details make the hover actually register:
+        * the curve passes through many positions *inside* the target button
+          (Roblox only marks a button hovered once the cursor moves within its
+          bounds), and
+        * the steps are paced over `duration` rather than fired instantly, so
+          Roblox's per-frame cursor polling samples those in-bounds positions
+          instead of only seeing the final landing point (a teleport)."""
+        x, y = int(x), int(y)
+        from_point = list(pyautogui.position())
+        (offset_boundary_x, offset_boundary_y, knots_count, distortion_mean,
+         distortion_st_dev, distortion_frequency, tween,
+         target_points) = generate_random_curve_parameters(pyautogui, from_point, [x, y])
+        points = HumanizeMouseTrajectory(
+            from_point, [x, y],
+            offset_boundary_x=offset_boundary_x, offset_boundary_y=offset_boundary_y,
+            knots_count=knots_count, distortion_mean=distortion_mean,
+            distortion_st_dev=distortion_st_dev, distortion_frequency=distortion_frequency,
+            tween=tween, target_points=target_points,
+        ).points
+
+        # The generator can emit several hundred points; downsample so the move
+        # stays snappy while still sampling many in-bounds positions near the end.
+        max_steps = 34
+        if len(points) > max_steps:
+            stride = len(points) / max_steps
+            points = [points[int(i * stride)] for i in range(max_steps)]
+        points.append((x, y))  # guarantee an exact final landing
+
+        # pydirectinput's default per-call PAUSE (0.1s) would make a multi-point
+        # move crawl, so zero it for the loop and do our own even pacing.
+        prev_pause = pydirectinput.PAUSE
+        pydirectinput.PAUSE = 0.0
         try:
-            self.cursor.move_to((int(x), int(y)), duration=duration)
+            per_point = duration / len(points)
+            for px, py in points:
+                pydirectinput.moveTo(int(round(px)), int(round(py)))
+                time.sleep(per_point)
         finally:
-            pyautogui.PAUSE = prev_pause
+            pydirectinput.PAUSE = prev_pause
 
     def _human_click(self, x, y, settle=0.1, hold=0.05, duration=0.3):
         """Human-glide onto (x, y), briefly settle, then press with
