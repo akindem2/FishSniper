@@ -24,6 +24,8 @@ except Exception as e:
     keyboard = None
     print(f"[UI] 'keyboard' module unavailable — global hotkeys will be disabled: {e}")
 
+ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico")
+
 DEFAULT_START_HOTKEY = "f1"
 DEFAULT_STOP_HOTKEY = "f2"
 
@@ -85,11 +87,12 @@ def tier_color(tier_index):
 BIOMES = ["Rainy", "Snowy", "Windy", "Hell", "Heaven", "Corruption", "Starfall", "Sand Storm", "Null",
           "Glitched", "Dreamspace", "Cyberspace", "Singularity", "Blazing Sun", "Incinerator"]
 
+# Monochrome symbol fallbacks (shown before a biome's thumbnail loads).
 BIOME_ICONS = {
-    "Rainy": "🌧️", "Snowy": "❄️", "Windy": "💨", "Hell": "🔥", "Heaven": "☁️",
-    "Corruption": "☠️", "Starfall": "🌠", "Sand Storm": "🏜️", "Null": "⬛",
-    "Glitched": "🧩", "Dreamspace": "💤", "Cyberspace": "🖥️", "Singularity": "🌀",
-    "Blazing Sun": "☀️", "Incinerator": "🌋",
+    "Rainy": "☂", "Snowy": "❄", "Windy": "≈", "Hell": "♨", "Heaven": "☁",
+    "Corruption": "☠", "Starfall": "★", "Sand Storm": "░", "Null": "∅",
+    "Glitched": "▨", "Dreamspace": "☾", "Cyberspace": "▣", "Singularity": "◎",
+    "Blazing Sun": "☀", "Incinerator": "✸",
 }
 
 DEFAULT_CHECKIN_SCREENSHOT_CONFIG = {
@@ -517,9 +520,9 @@ class PriorityBoard(QtWidgets.QWidget):
         self._clear_layout(self.columns_layout)
         self.column_lists = {}
 
-        self._add_column("unassigned", "📥 Unassigned", THEME["text_faint"], removable=False)
+        self._add_column("unassigned", "Unassigned", THEME["text_faint"], removable=False)
         for tier in range(1, self.num_tiers + 1):
-            title = f"🏆 Tier {tier}" if tier == 1 else f"Tier {tier}"
+            title = f"★ Tier {tier}" if tier == 1 else f"Tier {tier}"
             removable = (tier == self.num_tiers and self.num_tiers > 1)
             self._add_column(tier, title, tier_color(tier), removable=removable)
 
@@ -579,7 +582,7 @@ class PriorityBoard(QtWidgets.QWidget):
         if pix is not None:
             item.setIcon(QtGui.QIcon(pix))
         else:
-            item.setText(f"{BIOME_ICONS.get(biome, '🌐')}  {biome}")
+            item.setText(f"{BIOME_ICONS.get(biome, '◇')}  {biome}")
         return item
 
     def render(self):
@@ -634,14 +637,14 @@ class PriorityBoard(QtWidgets.QWidget):
 
 
 NAV_ITEMS = [
-    ("dashboard", "📋 Dashboard"),
-    ("settings", "⚙️ Settings"),
-    ("biomes", "🌍 Biomes"),
-    ("priority", "🏆 Priority"),
-    ("servers", "💬 Servers"),
-    ("shop", "🛒 Shop"),
-    ("auto_item", "🧪 Auto Item"),
-    ("gauntlet", "🥊 Gauntlet"),
+    ("dashboard", "▦ Dashboard"),
+    ("settings", "⚙ Settings"),
+    ("biomes", "◍ Biomes"),
+    ("priority", "★ Priority"),
+    ("servers", "▤ Servers"),
+    ("shop", "◆ Shop"),
+    ("auto_item", "◈ Auto Item"),
+    ("gauntlet", "▲ Gauntlet"),
 ]
 
 
@@ -656,6 +659,7 @@ class FishSniperUI(QtWidgets.QMainWindow):
         self._registered_hotkey_handles = []
 
         self.setWindowTitle("FishSniper")
+        self.setWindowIcon(QtGui.QIcon(ICON_PATH))
         self.resize(1120, 820)
         self.setMinimumSize(940, 640)
 
@@ -787,8 +791,8 @@ class FishSniperUI(QtWidgets.QMainWindow):
         v.setSpacing(8)
 
         brand = QtWidgets.QHBoxLayout()
-        logo = QtWidgets.QLabel("🎣")
-        logo.setStyleSheet("font-size: 26px;")
+        logo = QtWidgets.QLabel()
+        logo.setPixmap(QtGui.QIcon(ICON_PATH).pixmap(28, 28))
         text_col = QtWidgets.QVBoxLayout()
         text_col.setSpacing(0)
         name = QtWidgets.QLabel("FishSniper")
@@ -831,7 +835,7 @@ class FishSniperUI(QtWidgets.QMainWindow):
 
         v.addStretch(1)
 
-        self.save_bottom = QtWidgets.QPushButton("💾  Save Settings")
+        self.save_bottom = QtWidgets.QPushButton("Save Settings")
         self.save_bottom.setObjectName("ghost")
         self.save_bottom.setMinimumHeight(38)
         self.save_bottom.setCursor(QtCore.Qt.PointingHandCursor)
@@ -953,17 +957,17 @@ class FishSniperUI(QtWidgets.QMainWindow):
         cv.setContentsMargins(18, 16, 18, 16)
         cv.setSpacing(6)
 
-        cv.addWidget(self._muted("🎮 Roblox Cookie (.ROBLOSECURITY)"))
+        cv.addWidget(self._muted("Roblox Cookie (.ROBLOSECURITY)"))
         self.rb_token_entry = self._line_edit("Enter Roblox Cookie")
         self.rb_token_entry.setEchoMode(QtWidgets.QLineEdit.Password)
         cv.addWidget(self.rb_token_entry)
 
-        cv.addWidget(self._muted("💬 Discord User Token"))
+        cv.addWidget(self._muted("Discord User Token"))
         self.ds_token_entry = self._line_edit("Enter Discord Token")
         self.ds_token_entry.setEchoMode(QtWidgets.QLineEdit.Password)
         cv.addWidget(self.ds_token_entry)
 
-        cv.addWidget(self._muted("🔔 Discord Webhook URL (Optional)"))
+        cv.addWidget(self._muted("Discord Webhook URL (Optional)"))
         wh_row = QtWidgets.QHBoxLayout()
         self.ds_webhook_entry = self._line_edit("Enter Discord Webhook URL")
         wh_row.addWidget(self.ds_webhook_entry, 1)
@@ -974,7 +978,7 @@ class FishSniperUI(QtWidgets.QMainWindow):
         wh_row.addWidget(self.webhook_test_btn)
         cv.addLayout(wh_row)
 
-        cv.addWidget(self._muted("📣 Discord User ID to Ping (Optional)"))
+        cv.addWidget(self._muted("Discord User ID to Ping (Optional)"))
         self.ds_ping_user_id_entry = self._line_edit(
             "Pinged on Glitched / Dreamspace / Cyberspace joins")
         cv.addWidget(self.ds_ping_user_id_entry)
@@ -985,7 +989,7 @@ class FishSniperUI(QtWidgets.QMainWindow):
         bv = QtWidgets.QVBoxLayout(beh)
         bv.setContentsMargins(18, 16, 18, 16)
         bv.setSpacing(6)
-        self.sell_on_start_switch = QtWidgets.QCheckBox("💰 Sell inventory when FishSniper starts")
+        self.sell_on_start_switch = QtWidgets.QCheckBox("Sell inventory when FishSniper starts")
         self.sell_on_start_switch.setChecked(True)
         bv.addWidget(self.sell_on_start_switch)
         bv.addWidget(self._faint(
@@ -993,7 +997,7 @@ class FishSniperUI(QtWidgets.QMainWindow):
             "before fishing begins. Later server joins in the same run are unaffected.", wrap=True))
 
         afk_row = QtWidgets.QHBoxLayout()
-        afk_row.addWidget(QtWidgets.QLabel("🕹️ Anti-AFK interval while not fishing (sec):"))
+        afk_row.addWidget(QtWidgets.QLabel("Anti-AFK interval while not fishing (sec):"))
         self.anti_afk_interval_entry = self._line_edit("300", "300")
         self.anti_afk_interval_entry.setFixedWidth(80)
         afk_row.addWidget(self.anti_afk_interval_entry)
@@ -1085,7 +1089,7 @@ class FishSniperUI(QtWidgets.QMainWindow):
             cv.setSpacing(6)
 
             top = QtWidgets.QHBoxLayout()
-            icon_label = QtWidgets.QLabel(BIOME_ICONS.get(biome, "🌐"))
+            icon_label = QtWidgets.QLabel(BIOME_ICONS.get(biome, "◇"))
             icon_label.setStyleSheet("font-size: 15px;")
             icon_label.setFixedWidth(24)
             self.biome_icon_labels[biome] = icon_label
@@ -1115,14 +1119,14 @@ class FishSniperUI(QtWidgets.QMainWindow):
             fv.setContentsMargins(10, 8, 10, 8)
             fv.setSpacing(4)
 
-            fish_switch = QtWidgets.QCheckBox("🎣 Fish This Biome")
+            fish_switch = QtWidgets.QCheckBox("Fish This Biome")
             fish_switch.setChecked(True)
             self.fish_switches[biome] = fish_switch
             fv.addWidget(fish_switch)
             fv.addWidget(self._faint(
                 "When off, the bot just sits in this biome (with anti-AFK) instead of fishing.", wrap=True))
 
-            checkin_switch = QtWidgets.QCheckBox("📸 Check-in Screenshot")
+            checkin_switch = QtWidgets.QCheckBox("Check-in Screenshot")
             checkin_switch.setChecked(bool(default_config["enabled"]))
             self.checkin_switches[biome] = checkin_switch
             fv.addWidget(checkin_switch)
