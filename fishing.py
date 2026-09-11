@@ -666,6 +666,10 @@ class FishSolBot:
         self.currently_equipped_gauntlet = None
         self._pending_gauntlet_target = None
         self.gauntlet_swap_in_progress = False
+        # Timestamp of the most recent Start-button press. A gauntlet swap is
+        # held off until GAUNTLET_MIN_DELAY_AFTER_START seconds after this, so
+        # the inventory has time to load and the right device is picked.
+        self._last_start_press_time = 0.0
         self.gauntlet_swap_finished_callback = None
         # Set ONLY by the user pressing Stop (button or hotkey) — see
         # request_user_stop(). This is the one signal a gauntlet swap is
@@ -1492,6 +1496,11 @@ class FishSolBot:
 
     GAUNTLET_SWAP_CONFIRM_WAIT = 3.0
 
+    # Minimum seconds after a Start-button press before an auto-gauntlet swap
+    # may run. Items can take a while to load after joining, so swapping too
+    # early can select the wrong device from an unpopulated inventory.
+    GAUNTLET_MIN_DELAY_AFTER_START = 15.0
+
     def set_gauntlet_settings(self, gauntlets, default_gauntlet_name, biome_gauntlet_map):
         """gauntlets: {name: {"item_pos": (x,y), "gauntlet_button_pos":
         (x,y), "needs_scroll": bool, "scroll_ticks": int}}.
@@ -1548,6 +1557,20 @@ class FishSolBot:
                 or self.AUTO_ITEM_INVENTORY_BUTTON == (0, 0) or self.AUTO_ITEM_CLOSE_INVENTORY == (0, 0)):
             print(f"[Gauntlet] Coordinates aren't fully configured yet — skipping swap to '{target_name}'.")
             return
+
+        # Hold off until the inventory has had time to load after the last Start
+        # press, so the device is selected from a fully-populated inventory.
+        # Only a user Stop cuts this wait short (consistent with the swap
+        # itself), in which case the swap simply never starts.
+        remaining = self.GAUNTLET_MIN_DELAY_AFTER_START - (time.time() - self._last_start_press_time)
+        if remaining > 0:
+            print(f"[Gauntlet] Waiting {remaining:.1f}s for items to load before swapping to '{target_name}'...")
+            waited = 0.0
+            while waited < remaining:
+                if self.user_stop_requested:
+                    return
+                time.sleep(0.1)
+                waited += 0.1
 
         self.gauntlet_swap_in_progress = True
         print(f"[Gauntlet] Swapping to '{target_name}'...")
@@ -1639,6 +1662,7 @@ class FishSolBot:
         print(f"=== PATHING ROUTINE STARTED (Selling: {do_sell}) ===")
 
         self._human_click(*self.START_BUTTON_POS)
+        self._last_start_press_time = time.time()
 
         self.reset_character()
         if not self._cycle_active(): return
@@ -1695,6 +1719,7 @@ class FishSolBot:
                         time.sleep(2.0)
                         
                         self._human_click(*self.START_BUTTON_POS)
+                        self._last_start_press_time = time.time()
 
                         time.sleep(3.0)
                         button_clicked = True
