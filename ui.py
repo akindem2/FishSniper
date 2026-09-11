@@ -12,6 +12,7 @@ from pathlib import Path
 import os
 
 import requests
+import pyautogui
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -643,6 +644,7 @@ NAV_ITEMS = [
     ("shop", "◆ Shop"),
     ("auto_item", "◈ Auto Item"),
     ("gauntlet", "▲ Gauntlet"),
+    ("calibration", "⌖ Calibration"),
 ]
 
 
@@ -663,14 +665,20 @@ class FishSniperUI(QtWidgets.QMainWindow):
         # GUI-thread marshaling: any thread can call self.after(0, fn).
         self._invoke.connect(self._run_on_ui)
 
+        # Session stats (reset each time the macro starts). See _reset_session_stats.
+        self.session_stats = {}
+        self._reset_session_stats()
+
         # Link global instances.
         scanner.fish_loop = fish_loop
         fish_loop.set_path_change_callback(self._on_active_path_changed)
         fish_loop.set_failsafe_callback(self._on_fishing_failsafe)
         fish_loop.set_buy_callback(self._on_item_purchased)
+        fish_loop.set_catch_callback(self._on_fish_caught)
         fish_loop.set_session_end_callback(scanner.handle_fish_loop_session_ending)
         fish_loop.set_gauntlet_swap_finished_callback(scanner.handle_gauntlet_swap_finished)
         scanner.set_biome_time_updated_callback(self._on_biome_time_updated)
+        scanner.set_biome_joined_callback(self._on_biome_joined)
 
         root = AnimatedBackground()
         self.setCentralWidget(root)
@@ -863,6 +871,7 @@ class FishSniperUI(QtWidgets.QMainWindow):
             "shop": self._build_shop_page(),
             "auto_item": self._build_auto_item_page(),
             "gauntlet": self._build_gauntlet_page(),
+            "calibration": self._build_calibration_page(),
         }
         for key, _ in NAV_ITEMS:
             self.stack.addWidget(self.pages[key])
@@ -895,8 +904,9 @@ class FishSniperUI(QtWidgets.QMainWindow):
         grid.setVerticalSpacing(8)
 
         grid.addWidget(self._muted("Screen Resolution"), 0, 0)
-        self.res_dropdown = self._combo(["1080p", "1920x1200", "1440p", "1366x768"])
+        self.res_dropdown = self._combo(["1080p", "1920x1200", "1440p", "1366x768", "Custom"])
         self.res_dropdown.currentTextChanged.connect(lambda _v: self.save_settings())
+        self.res_dropdown.currentTextChanged.connect(self._on_resolution_changed)
         grid.addWidget(self.res_dropdown, 1, 0)
 
         grid.addWidget(self._muted("Pathing Mode"), 0, 1)
@@ -923,6 +933,43 @@ class FishSniperUI(QtWidgets.QMainWindow):
         sv.addLayout(grid)
         v.addWidget(setup)
 
+        # Session stats panel — live counters for the current run.
+        stats_card = self._card()
+        stv = QtWidgets.QVBoxLayout(stats_card)
+        stv.setContentsMargins(20, 16, 20, 16)
+        stv.setSpacing(8)
+        stv.addWidget(self._faint("SESSION STATS"))
+        stats_grid = QtWidgets.QGridLayout()
+        stats_grid.setHorizontalSpacing(24)
+        stats_grid.setVerticalSpacing(8)
+        self.stat_labels = {}
+        stat_defs = [
+            ("uptime", "Uptime"), ("catches", "Fish Caught"), ("per_hour", "Catches / Hr"),
+            ("biomes", "Biomes Joined"), ("failsafes", "Failsafes"), ("bought", "Items Bought"),
+        ]
+        for i, (key, title) in enumerate(stat_defs):
+            row, col = divmod(i, 3)
+            cell = QtWidgets.QVBoxLayout()
+            cell.setSpacing(0)
+            value = QtWidgets.QLabel("0")
+            value.setObjectName("h1")
+            title_lbl = self._faint(title)
+            cell.addWidget(value)
+            cell.addWidget(title_lbl)
+            wrap = QtWidgets.QWidget()
+            wrap.setLayout(cell)
+            stats_grid.addWidget(wrap, row, col)
+            self.stat_labels[key] = value
+        for c in range(3):
+            stats_grid.setColumnStretch(c, 1)
+        stv.addLayout(stats_grid)
+        v.addWidget(stats_card)
+
+        # Ticks once a second while running to refresh uptime / catches-per-hour.
+        self._stats_timer = QtCore.QTimer(self)
+        self._stats_timer.setInterval(1000)
+        self._stats_timer.timeout.connect(self._refresh_stats_panel)
+
         logs = self._card()
         lv = QtWidgets.QVBoxLayout(logs)
         lv.setContentsMargins(20, 16, 20, 16)
@@ -941,6 +988,283 @@ class FishSniperUI(QtWidgets.QMainWindow):
         safe = escape(text).replace(" ", "&nbsp;")
         self.log_view.insertHtml(f'<span style="color:{color};">{safe}</span><br>')
         self.log_view.moveCursor(QtGui.QTextCursor.End)
+
+    # ------------------------------------------------------------------
+    # Session stats
+    # ------------------------------------------------------------------
+    def _reset_session_stats(self):
+        self.session_stats = {
+            "start_time": None,      # set on start; None while stopped
+            "catches": 0,
+            "biomes_joined": 0,
+            "biome_breakdown": {},   # biome title -> join count
+            "failsafes": 0,
+            "items_bought": 0,
+        }
+
+    def _session_duration(self):
+        start = self.session_stats.get("start_time")
+        return (time.time() - start) if start else 0
+
+    def _refresh_stats_panel(self):
+        if not hasattr(self, "stat_labels"):
+            return
+        s = self.session_stats
+        duration = self._session_duration()
+        hours = duration / 3600 if duration else 0
+        per_hour = (s["catches"] / hours) if hours > 0 else 0
+        self.stat_labels["uptime"].setText(format_biome_duration(int(duration)))
+        self.stat_labels["catches"].setText(str(s["catches"]))
+        self.stat_labels["per_hour"].setText(f"{per_hour:.1f}")
+        self.stat_labels["biomes"].setText(str(s["biomes_joined"]))
+        self.stat_labels["failsafes"].setText(str(s["failsafes"]))
+        self.stat_labels["bought"].setText(str(s["items_bought"]))
+
+    def _on_fish_caught(self):
+        def handle():
+            self.session_stats["catches"] += 1
+            self._refresh_stats_panel()
+        self.after(0, handle)
+
+    def _on_biome_joined(self, biome):
+        def handle():
+            self.session_stats["biomes_joined"] += 1
+            bd = self.session_stats["biome_breakdown"]
+            bd[biome] = bd.get(biome, 0) + 1
+            self._refresh_stats_panel()
+        self.after(0, handle)
+
+    # ------------------------------------------------------------------
+    # Calibration page
+    # ------------------------------------------------------------------
+    def _calibration_schema(self):
+        """Ordered (section, title, [(key, label, kind)]) describing every
+        coordinate. kind is 'point', 'region', or 'items'."""
+        return [
+            ("FISHING", "Fishing", [
+                ("CAST_ROD", "Cast Rod", "point"),
+                ("BITE_INDICATOR", "Bite Indicator", "point"),
+                ("BAR_COLOR", "Bar Color Sample", "point"),
+                ("CLAIM_FISH", "Claim Fish", "point"),
+                ("ALT_CLAIM_FISH", "Alt Claim Fish", "point"),
+                ("MINIGAME_REGION", "Minigame Region", "region"),
+            ]),
+            ("MERCHANT", "Merchant", [
+                ("CAMERA_SETUP_1", "Camera Setup 1", "point"),
+                ("CAMERA_SETUP_2", "Camera Setup 2", "point"),
+                ("OPEN_MERCHANT_1", "Open Merchant 1", "point"),
+                ("OPEN_MERCHANT_2", "Open Merchant 2", "point"),
+                ("SELECT_FISH", "Select Fish", "point"),
+                ("SELL_ALL_ON", "Sell All (on)", "point"),
+                ("SELL_ALL_OFF", "Sell All (off)", "point"),
+                ("CONFIRM_SELL", "Confirm Sell", "point"),
+                ("CLOSE_MERCHANT", "Close Merchant", "point"),
+            ]),
+            ("START", "Start", [
+                ("START_BUTTON_POS", "Start Button", "point"),
+            ]),
+            ("BUY", "Buy", [
+                ("OPEN_BUY_TAB", "Open Buy Tab", "point"),
+                ("PURCHASE_BUTTON_1", "Purchase Button 1", "point"),
+                ("AMOUNT_BOX", "Amount Box", "point"),
+                ("PURCHASE_BUTTON_2", "Purchase Button 2", "point"),
+                ("CLOSE_ITEM_POPUP", "Close Item Popup", "point"),
+                ("ITEMS", "Buy Items", "items"),
+            ]),
+            ("AUTO_ITEM", "Auto Item", [
+                ("INVENTORY_BUTTON", "Inventory Button", "point"),
+                ("ITEMS_TAB", "Items Tab", "point"),
+                ("SEARCH_BAR", "Search Bar", "point"),
+                ("FIRST_RESULT", "First Result", "point"),
+                ("AMOUNT_BOX", "Amount Box", "point"),
+                ("USE_BUTTON", "Use Button", "point"),
+                ("CLOSE_INVENTORY", "Close Inventory", "point"),
+            ]),
+            ("GAUNTLET", "Gauntlet", [
+                ("GAUNTLET_TAB", "Gauntlet Tab", "point"),
+            ]),
+        ]
+
+    def _build_calibration_page(self):
+        page, cl = self._scroll_page()
+        cl.addWidget(self._heading("Calibration"))
+        cl.addWidget(self._faint(
+            "Coordinates for the selected resolution. These are editable only when "
+            "Screen Resolution (Dashboard) is set to \"Custom\" — every other profile "
+            "is shown read-only. \"Grab\" captures the mouse position after a 3-second "
+            "countdown, so switch to Roblox and hover the target during it.", wrap=True))
+        self.calib_status = self._faint("")
+        cl.addWidget(self.calib_status)
+
+        self.calib_fields = {}
+        self._calib_counter = 0
+
+        for section, title, entries in self._calibration_schema():
+            self.calib_fields.setdefault(section, {})
+            card = self._card()
+            cardv = QtWidgets.QVBoxLayout(card)
+            cardv.setContentsMargins(16, 12, 16, 12)
+            cardv.setSpacing(6)
+            cardv.addWidget(self._faint(title.upper()))
+            grid = QtWidgets.QGridLayout()
+            grid.setHorizontalSpacing(8)
+            grid.setVerticalSpacing(4)
+            r = 0
+            for key, label, kind in entries:
+                if kind == "region":
+                    self._calib_region_row(grid, r, section, key, label)
+                    r += 1
+                elif kind == "items":
+                    self.calib_fields[section]["ITEMS"] = {}
+                    for item_name in fishing.COORDS["1080p"][section]["ITEMS"].keys():
+                        self._calib_point_row(grid, r, section, key, item_name, item_name)
+                        r += 1
+                else:
+                    self._calib_point_row(grid, r, section, key, None, label)
+                    r += 1
+            cardv.addLayout(grid)
+            cl.addWidget(card)
+        cl.addStretch(1)
+
+        self._populate_calibration(self.res_dropdown.currentText())
+        return page
+
+    def _calib_point_row(self, grid, row, section, key, item, label):
+        grid.addWidget(self._muted(label), row, 0)
+        x = self._line_edit(); x.setFixedWidth(66)
+        y = self._line_edit(); y.setFixedWidth(66)
+        grid.addWidget(QtWidgets.QLabel("X"), row, 1)
+        grid.addWidget(x, row, 2)
+        grid.addWidget(QtWidgets.QLabel("Y"), row, 3)
+        grid.addWidget(y, row, 4)
+        grab = QtWidgets.QPushButton("Grab")
+        grab.setObjectName("ghost")
+        grab.setFixedWidth(58)
+        grab.setCursor(QtCore.Qt.PointingHandCursor)
+        grid.addWidget(grab, row, 5)
+
+        def apply(px, py):
+            x.setText(str(px)); y.setText(str(py))
+        grab.clicked.connect(lambda _=False, a=apply, l=label: self._calib_grab(a, l))
+        x.editingFinished.connect(self._sync_custom_coords_from_fields)
+        y.editingFinished.connect(self._sync_custom_coords_from_fields)
+
+        rec = {"x": x, "y": y, "grab": grab}
+        if item is None:
+            self.calib_fields[section][key] = rec
+        else:
+            self.calib_fields[section]["ITEMS"][item] = rec
+
+    def _calib_region_row(self, grid, row, section, key, label):
+        grid.addWidget(self._muted(label), row, 0)
+        x = self._line_edit(); y = self._line_edit()
+        w = self._line_edit(); h = self._line_edit()
+        for f in (x, y, w, h):
+            f.setFixedWidth(50)
+        for i, (lbl, f) in enumerate((("X", x), ("Y", y), ("W", w), ("H", h))):
+            grid.addWidget(QtWidgets.QLabel(lbl), row, 1 + i * 2)
+            grid.addWidget(f, row, 2 + i * 2)
+        grab_tl = QtWidgets.QPushButton("Grab TL")
+        grab_br = QtWidgets.QPushButton("Grab BR")
+        for b, c in ((grab_tl, 9), (grab_br, 10)):
+            b.setObjectName("ghost"); b.setFixedWidth(70); b.setCursor(QtCore.Qt.PointingHandCursor)
+            grid.addWidget(b, row, c)
+
+        def apply_tl(px, py):
+            x.setText(str(px)); y.setText(str(py))
+
+        def apply_br(px, py):
+            try:
+                ox, oy = int(x.text()), int(y.text())
+            except ValueError:
+                ox, oy = px, py
+            w.setText(str(max(1, px - ox))); h.setText(str(max(1, py - oy)))
+
+        grab_tl.clicked.connect(lambda _=False: self._calib_grab(apply_tl, label + " top-left"))
+        grab_br.clicked.connect(lambda _=False: self._calib_grab(apply_br, label + " bottom-right"))
+        for f in (x, y, w, h):
+            f.editingFinished.connect(self._sync_custom_coords_from_fields)
+
+        self.calib_fields[section][key] = {"x": x, "y": y, "w": w, "h": h,
+                                           "grab": grab_tl, "grab_br": grab_br}
+
+    def _calib_grab(self, apply_fn, label):
+        if self.res_dropdown.currentText() != "Custom" or self._calib_counter > 0:
+            return
+        self._calib_apply = apply_fn
+        self._calib_grab_label = label
+        self._calib_counter = 3
+        if not hasattr(self, "_calib_timer"):
+            self._calib_timer = QtCore.QTimer(self)
+            self._calib_timer.setInterval(1000)
+            self._calib_timer.timeout.connect(self._calib_tick)
+        self.calib_status.setText(f"Capturing {label} in {self._calib_counter}… hover the target in Roblox.")
+        self._calib_timer.start()
+
+    def _calib_tick(self):
+        self._calib_counter -= 1
+        if self._calib_counter > 0:
+            self.calib_status.setText(
+                f"Capturing {self._calib_grab_label} in {self._calib_counter}… hover the target in Roblox.")
+            return
+        self._calib_timer.stop()
+        pos = pyautogui.position()
+        self._calib_apply(int(pos[0]), int(pos[1]))
+        self.calib_status.setText(f"Captured {self._calib_grab_label} at ({int(pos[0])}, {int(pos[1])}).")
+        self._sync_custom_coords_from_fields()
+
+    def _set_calib_rec(self, rec, val, editable):
+        rec["x"].setText(str(val[0]))
+        rec["y"].setText(str(val[1]))
+        if "w" in rec:
+            rec["w"].setText(str(val[2] if len(val) > 2 else 0))
+            rec["h"].setText(str(val[3] if len(val) > 3 else 0))
+        for fkey in ("x", "y", "w", "h"):
+            if fkey in rec:
+                rec[fkey].setReadOnly(not editable)
+        for bkey in ("grab", "grab_br"):
+            if bkey in rec:
+                rec[bkey].setEnabled(editable)
+
+    def _populate_calibration(self, res):
+        if not hasattr(self, "calib_fields"):
+            return
+        editable = (res == "Custom")
+        coords = fishing.COORDS.get(res, fishing.COORDS["Custom"])
+        for section, keys in self.calib_fields.items():
+            for key, rec in keys.items():
+                if key == "ITEMS":
+                    items = coords.get(section, {}).get("ITEMS", {})
+                    for item, irec in rec.items():
+                        self._set_calib_rec(irec, items.get(item, (0, 0)), editable)
+                    continue
+                self._set_calib_rec(rec, coords.get(section, {}).get(key, (0, 0)), editable)
+
+    def _sync_custom_coords_from_fields(self):
+        if self.res_dropdown.currentText() != "Custom" or not hasattr(self, "calib_fields"):
+            return
+
+        def geti(le):
+            try:
+                return int(le.text().strip())
+            except ValueError:
+                return 0
+
+        custom = fishing.COORDS["Custom"]
+        for section, keys in self.calib_fields.items():
+            for key, rec in keys.items():
+                if key == "ITEMS":
+                    custom[section].setdefault("ITEMS", {})
+                    for item, irec in rec.items():
+                        custom[section]["ITEMS"][item] = (geti(irec["x"]), geti(irec["y"]))
+                elif "w" in rec:
+                    custom[section][key] = (geti(rec["x"]), geti(rec["y"]), geti(rec["w"]), geti(rec["h"]))
+                else:
+                    custom[section][key] = (geti(rec["x"]), geti(rec["y"]))
+        self.save_settings()
+
+    def _on_resolution_changed(self, res):
+        self._populate_calibration(res)
 
     # ------------------------------------------------------------------
     # Settings page
@@ -1353,6 +1677,8 @@ class FishSniperUI(QtWidgets.QMainWindow):
 
     def _on_item_purchased(self, item_name, quantity):
         def handle():
+            self.session_stats["items_bought"] += int(quantity)
+            self._refresh_stats_panel()
             self.refresh_buy_status_labels()
             webhook_url = self.ds_webhook_entry.text().strip()
             if not webhook_url or not webhook_url.startswith("http"):
@@ -1715,6 +2041,8 @@ class FishSniperUI(QtWidgets.QMainWindow):
 
     def _on_fishing_failsafe(self, failsafe_count, switched_path, screenshot_bytes, triggered_sell):
         def handle():
+            self.session_stats["failsafes"] += 1
+            self._refresh_stats_panel()
             webhook_url = self.ds_webhook_entry.text().strip()
             if not webhook_url or not webhook_url.startswith("http"):
                 return
@@ -1778,6 +2106,12 @@ class FishSniperUI(QtWidgets.QMainWindow):
         self._set_universal_running(True)
         self.update_status("Scanning for biomes...")
 
+        # Fresh stats for this run.
+        self._reset_session_stats()
+        self.session_stats["start_time"] = time.time()
+        self._refresh_stats_panel()
+        self._stats_timer.start()
+
         self.save_settings()
         if self.sell_on_start_switch.isChecked():
             fish_loop.request_startup_sell()
@@ -1796,11 +2130,30 @@ class FishSniperUI(QtWidgets.QMainWindow):
         self._set_universal_running(False)
         self.update_status("Stopped")
 
+        # Freeze the session stats and fire the end-of-session summary embed
+        # (no ping) before clearing the running state.
+        self._stats_timer.stop()
+        summary = {
+            "duration_seconds": self._session_duration(),
+            "catches": self.session_stats["catches"],
+            "biomes_joined": self.session_stats["biomes_joined"],
+            "biome_breakdown": dict(self.session_stats["biome_breakdown"]),
+            "failsafes": self.session_stats["failsafes"],
+            "items_bought": self.session_stats["items_bought"],
+        }
+        self.session_stats["start_time"] = None
+        self._refresh_stats_panel()
+
         fish_loop.request_user_stop()
         scanner.toggle_off()
         fish_loop.toggle_off()
         print("[FishSniper] Stopped - All systems paused")
         Webhook(webhook_url).send_app_stopped()
+        if webhook_url and webhook_url.startswith("http"):
+            threading.Thread(
+                target=lambda: __import__("webhook").Webhook(webhook_url).send_session_summary(summary),
+                daemon=True,
+            ).start()
 
     def apply_hotkeys(self):
         if keyboard is None:
@@ -2041,8 +2394,13 @@ class FishSniperUI(QtWidgets.QMainWindow):
 
         self._loading = True
         try:
+            # Restore the custom-resolution coordinates before the resolution is
+            # applied, so a saved "Custom" profile is populated and usable.
+            fish_loop.update_custom_coords(settings.get('custom_coords'))
+
             if 'resolution' in settings:
                 self.res_dropdown.setCurrentText(settings['resolution'])
+            self._populate_calibration(self.res_dropdown.currentText())
 
             if 'speed' in settings:
                 saved_speed = settings['speed']
@@ -2282,6 +2640,7 @@ class FishSniperUI(QtWidgets.QMainWindow):
             'gauntlets': gauntlets,
             'gauntlet_default': gauntlet_default,
             'gauntlet_biome_map': gauntlet_biome_map,
+            'custom_coords': fishing.COORDS["Custom"],
         }
         save_settings_to_file(settings_data)
 

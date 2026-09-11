@@ -879,6 +879,7 @@ class Scanner(discord.Client):
         self.biome_time_thread = None
         self.biome_time_stop = None
         self.biome_time_updated_callback = None  # callback(biome_title, new_total_seconds)
+        self.biome_joined_callback = None  # callback(biome_title) fired when a biome is confirmed/joined
 
     def biome_priority_level(self, biome_name):
         """
@@ -1289,6 +1290,8 @@ class Scanner(discord.Client):
             self.fish_loop.request_gauntlet_for_biome(biome)
         if self.ui_reference:
             self.ui_reference.update_status(f"Fishing in {biome}...")
+        if self.biome_joined_callback:
+            self.biome_joined_callback(biome)
         if self.webhook_url:
             from webhook import Webhook
             screenshot_bytes = self._wait_for_join_screenshot(stop_event)
@@ -1478,6 +1481,9 @@ class Scanner(discord.Client):
     # ------------------------------------------------------------------
 
     BIOME_TIME_POLL_INTERVAL = 1.0
+
+    def set_biome_joined_callback(self, callback):
+        self.biome_joined_callback = callback
 
     def set_biome_time_updated_callback(self, callback):
         """callback(biome_title, new_total_seconds) — fired every time a

@@ -71,6 +71,38 @@ class Webhook:
             "color": discord.Color.red().value,
         })
 
+    def send_session_summary(self, stats):
+        """Posts an end-of-session recap embed (fired when the user stops the
+        macro). Deliberately sends no `content`, so it never pings anyone."""
+        duration = stats.get("duration_seconds", 0)
+        catches = stats.get("catches", 0)
+        hours = duration / 3600 if duration else 0
+        per_hour = (catches / hours) if hours > 0 else 0
+
+        fields = [
+            {"name": "Duration", "value": _format_duration(duration), "inline": True},
+            {"name": "Fish Caught", "value": str(catches), "inline": True},
+            {"name": "Catches / Hour", "value": f"{per_hour:.1f}", "inline": True},
+            {"name": "Biomes Joined", "value": str(stats.get("biomes_joined", 0)), "inline": True},
+            {"name": "Failsafes", "value": str(stats.get("failsafes", 0)), "inline": True},
+            {"name": "Items Bought", "value": str(stats.get("items_bought", 0)), "inline": True},
+        ]
+
+        breakdown = stats.get("biome_breakdown") or {}
+        if breakdown:
+            lines = "\n".join(
+                f"• {biome}: {count}"
+                for biome, count in sorted(breakdown.items(), key=lambda kv: (-kv[1], kv[0]))
+            )
+            fields.append({"name": "Biome Breakdown", "value": lines[:1024], "inline": False})
+
+        self._send({
+            "title": "Session Summary",
+            "description": "Here's how this run went.",
+            "color": discord.Color.blurple().value,
+            "fields": fields,
+        })
+
     def send_biome_joined(self, biome, join_url=None, is_priority_interrupt=False, ping_user_id=None,
                            screenshot_bytes=None):
         fields = []

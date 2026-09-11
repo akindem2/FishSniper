@@ -1,4 +1,5 @@
 import io
+import copy
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -337,6 +338,11 @@ COORDS = {
     }
 }
 
+# The "Custom" profile is user-calibrated from the app's Calibration tab. It
+# starts as a copy of the 1080p layout (a sane baseline to tweak from) and is
+# overwritten at runtime from saved settings via update_custom_coords().
+COORDS["Custom"] = copy.deepcopy(COORDS["1080p"])
+
 PATHING_TIMINGS = {
     "VIP": {
         "ALIGNMENT1": 4.15,
@@ -636,6 +642,7 @@ class FishSolBot:
         self.total_consecutive_failsafes = 0  # not reset by path switching — drives the sell-recovery threshold
         self.path_change_callback = None
         self.failsafe_callback = None
+        self.catch_callback = None  # callback() fired after each successful fish catch
         self.last_join_screenshot = None
         self.session_id = 0
         self._active_session_id = None
@@ -895,6 +902,27 @@ class FishSolBot:
 
     def set_path_change_callback(self, callback):
         self.path_change_callback = callback
+
+    def set_catch_callback(self, callback):
+        self.catch_callback = callback
+
+    def update_custom_coords(self, custom_coords):
+        """Deep-merge a saved custom-resolution coordinate dict into
+        COORDS["Custom"] (from the Calibration tab / settings). Missing
+        sections/keys keep the 1080p-derived defaults."""
+        if not custom_coords:
+            return
+        target = COORDS["Custom"]
+        for section, values in custom_coords.items():
+            if section not in target or not isinstance(values, dict):
+                continue
+            for key, val in values.items():
+                if key == "ITEMS" and isinstance(val, dict):
+                    target[section].setdefault("ITEMS", {})
+                    for item_name, pos in val.items():
+                        target[section]["ITEMS"][item_name] = tuple(pos)
+                elif isinstance(val, (list, tuple)):
+                    target[section][key] = tuple(val)
 
     def set_failsafe_callback(self, callback):
         """callback(failsafe_count, switched_path, screenshot_bytes,
@@ -1822,6 +1850,8 @@ class FishSolBot:
         
         self.catch_count += 1
         self.record_successful_catch()
+        if self.catch_callback:
+            self.catch_callback()
         print(f"--> Fish caught successfully! Server tally: {self.catch_count}/{self.max_catches}")
 
     def start(self):
