@@ -1107,8 +1107,9 @@ class FishSniperUI(QtWidgets.QMainWindow):
             cardv.setSpacing(6)
             cardv.addWidget(self._faint(title.upper()))
             grid = QtWidgets.QGridLayout()
-            grid.setHorizontalSpacing(8)
+            grid.setHorizontalSpacing(6)
             grid.setVerticalSpacing(4)
+            grid.setColumnStretch(0, 1)  # label column absorbs slack; fixed cols stay in view
             r = 0
             for key, label, kind in entries:
                 if kind == "region":
@@ -1131,17 +1132,15 @@ class FishSniperUI(QtWidgets.QMainWindow):
 
     def _calib_point_row(self, grid, row, section, key, item, label):
         grid.addWidget(self._muted(label), row, 0)
-        x = self._line_edit(); x.setFixedWidth(66)
-        y = self._line_edit(); y.setFixedWidth(66)
-        grid.addWidget(QtWidgets.QLabel("X"), row, 1)
-        grid.addWidget(x, row, 2)
-        grid.addWidget(QtWidgets.QLabel("Y"), row, 3)
-        grid.addWidget(y, row, 4)
+        x = self._line_edit("X"); x.setFixedWidth(58)
+        y = self._line_edit("Y"); y.setFixedWidth(58)
+        grid.addWidget(x, row, 1)
+        grid.addWidget(y, row, 2)
         grab = QtWidgets.QPushButton("Grab")
         grab.setObjectName("ghost")
-        grab.setFixedWidth(58)
+        grab.setFixedWidth(56)
         grab.setCursor(QtCore.Qt.PointingHandCursor)
-        grid.addWidget(grab, row, 5)
+        grid.addWidget(grab, row, 3)
 
         def apply(px, py):
             x.setText(str(px)); y.setText(str(py))
@@ -1157,17 +1156,17 @@ class FishSniperUI(QtWidgets.QMainWindow):
 
     def _calib_region_row(self, grid, row, section, key, label):
         grid.addWidget(self._muted(label), row, 0)
-        x = self._line_edit(); y = self._line_edit()
-        w = self._line_edit(); h = self._line_edit()
-        for f in (x, y, w, h):
-            f.setFixedWidth(50)
-        for i, (lbl, f) in enumerate((("X", x), ("Y", y), ("W", w), ("H", h))):
-            grid.addWidget(QtWidgets.QLabel(lbl), row, 1 + i * 2)
-            grid.addWidget(f, row, 2 + i * 2)
-        grab_tl = QtWidgets.QPushButton("Grab TL")
-        grab_br = QtWidgets.QPushButton("Grab BR")
-        for b, c in ((grab_tl, 9), (grab_br, 10)):
-            b.setObjectName("ghost"); b.setFixedWidth(70); b.setCursor(QtCore.Qt.PointingHandCursor)
+        x = self._line_edit("X"); y = self._line_edit("Y")
+        w = self._line_edit("W"); h = self._line_edit("H")
+        for i, f in enumerate((x, y, w, h)):
+            f.setFixedWidth(46)
+            grid.addWidget(f, row, 1 + i)
+        grab_tl = QtWidgets.QPushButton("TL")
+        grab_br = QtWidgets.QPushButton("BR")
+        grab_tl.setToolTip("Grab top-left corner")
+        grab_br.setToolTip("Grab bottom-right corner")
+        for b, c in ((grab_tl, 5), (grab_br, 6)):
+            b.setObjectName("ghost"); b.setFixedWidth(40); b.setCursor(QtCore.Qt.PointingHandCursor)
             grid.addWidget(b, row, c)
 
         def apply_tl(px, py):
