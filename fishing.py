@@ -343,6 +343,28 @@ COORDS = {
 # overwritten at runtime from saved settings via update_custom_coords().
 COORDS["Custom"] = copy.deepcopy(COORDS["1080p"])
 
+
+def _scale_coords(src, factor):
+    """Uniformly scales a coordinate profile by `factor` (points, the minigame
+    region, and every buy-item slot). Zeros stay zero, so unset (0, 0) entries
+    are preserved."""
+    out = {}
+    for section, values in src.items():
+        out[section] = {}
+        for key, val in values.items():
+            if key == "ITEMS":
+                out[section]["ITEMS"] = {
+                    name: tuple(int(c * factor) for c in pos) for name, pos in val.items()
+                }
+            else:
+                out[section][key] = tuple(int(c * factor) for c in val)
+    return out
+
+
+# 4K (3840x2160) is exactly 2x 1080p in both dimensions and the same 16:9
+# aspect ratio, so every coordinate is simply the 1080p value doubled.
+COORDS["4K"] = _scale_coords(COORDS["1080p"], 2)
+
 PATHING_TIMINGS = {
     "VIP": {
         "ALIGNMENT1": 4.15,
