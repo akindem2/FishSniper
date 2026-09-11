@@ -274,6 +274,15 @@ def build_qss():
     QPushButton#stop:hover {{ background: {T['danger_hover']}; }}
     QPushButton#ghost {{ background: transparent; color: {T['accent']}; border: 1px solid {T['card_border']}; }}
     QPushButton#ghost:hover {{ background: rgba(56,189,248,0.10); border: 1px solid {T['accent']}; }}
+    /* Compact calibration widgets: tight padding so text isn't clipped in the
+       narrow fixed-width fields/buttons. */
+    QPushButton#calibGrab {{
+        background: transparent; color: {T['accent']}; border: 1px solid {T['card_border']};
+        padding: 4px 6px; border-radius: 8px; font-weight: 700;
+    }}
+    QPushButton#calibGrab:hover {{ background: rgba(56,189,248,0.12); border: 1px solid {T['accent']}; }}
+    QPushButton#calibGrab:disabled {{ color: {T['text_faint']}; border: 1px solid {T['card_border']}; }}
+    QLineEdit#calibField {{ padding: 4px 5px; }}
     QPushButton#danger {{ background: {T['danger']}; color: #2a0710; }}
     QPushButton#danger:hover {{ background: {T['danger_hover']}; }}
     QPushButton#iconGhost {{
@@ -1132,13 +1141,13 @@ class FishSniperUI(QtWidgets.QMainWindow):
 
     def _calib_point_row(self, grid, row, section, key, item, label):
         grid.addWidget(self._muted(label), row, 0)
-        x = self._line_edit("X"); x.setFixedWidth(58)
-        y = self._line_edit("Y"); y.setFixedWidth(58)
+        x = self._line_edit("X"); x.setObjectName("calibField"); x.setFixedWidth(68)
+        y = self._line_edit("Y"); y.setObjectName("calibField"); y.setFixedWidth(68)
         grid.addWidget(x, row, 1)
         grid.addWidget(y, row, 2)
         grab = QtWidgets.QPushButton("Grab")
-        grab.setObjectName("ghost")
-        grab.setFixedWidth(56)
+        grab.setObjectName("calibGrab")
+        grab.setFixedWidth(70)
         grab.setCursor(QtCore.Qt.PointingHandCursor)
         grid.addWidget(grab, row, 3)
 
@@ -1159,14 +1168,15 @@ class FishSniperUI(QtWidgets.QMainWindow):
         x = self._line_edit("X"); y = self._line_edit("Y")
         w = self._line_edit("W"); h = self._line_edit("H")
         for i, f in enumerate((x, y, w, h)):
-            f.setFixedWidth(46)
+            f.setObjectName("calibField")
+            f.setFixedWidth(68)
             grid.addWidget(f, row, 1 + i)
         grab_tl = QtWidgets.QPushButton("TL")
         grab_br = QtWidgets.QPushButton("BR")
         grab_tl.setToolTip("Grab top-left corner")
         grab_br.setToolTip("Grab bottom-right corner")
         for b, c in ((grab_tl, 5), (grab_br, 6)):
-            b.setObjectName("ghost"); b.setFixedWidth(40); b.setCursor(QtCore.Qt.PointingHandCursor)
+            b.setObjectName("calibGrab"); b.setFixedWidth(44); b.setCursor(QtCore.Qt.PointingHandCursor)
             grid.addWidget(b, row, c)
 
         def apply_tl(px, py):
